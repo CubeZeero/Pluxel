@@ -9,7 +9,7 @@ import { customInstallDirs } from "../lib/theme";
 import { isInstallBlocked, isMacOS } from "../lib/platform";
 import { toUrl } from "../lib/text";
 import { useT } from "../lib/i18n";
-import type { InstallParams } from "../lib/api";
+import { api, type InstallParams } from "../lib/api";
 import {
   KIND_LABELS,
   KIND_ORDER,
@@ -70,6 +70,10 @@ function DetailBody({
   // Custom install folders are configured in Settings.
   const customDirs = customInstallDirs();
   const baseName = (dir: string) => dir.split(/[/\\]/).filter(Boolean).pop() ?? dir;
+  // Folder an install record's files live in (parent of the first stored path).
+  const installDir = (paths: string[]): string | null =>
+    paths.length ? paths[0].replace(/[/\\][^/\\]*$/, "") : null;
+  const reveal = (paths: string[]) => paths[0] && api.revealPath(paths[0]);
 
   const [editing, setEditing] = useState(false);
   const [showBannerInfo, setShowBannerInfo] = useState(false);
@@ -353,6 +357,20 @@ function DetailBody({
                   <span className="installed-badge">
                     <i className="bi bi-check-circle-fill" /> {t("install.installed")}
                   </span>
+                  {installDir(selectedRecord.paths) && (
+                    <div className="install-location">
+                      <code className="install-abs-path" title={installDir(selectedRecord.paths)!}>
+                        {installDir(selectedRecord.paths)}
+                      </code>
+                      <button
+                        className="icon-btn"
+                        title={t("install.reveal")}
+                        onClick={() => reveal(selectedRecord.paths)}
+                      >
+                        <i className="bi bi-folder2-open" />
+                      </button>
+                    </div>
+                  )}
                   <div className="installed-actions">
                     <button
                       className="btn"
@@ -391,9 +409,20 @@ function DetailBody({
                 <li key={rec.id}>
                   <div className="install-info">
                     <span className="install-label">{rec.label}</span>
-                    <span className="install-path">{rec.target_dir}</span>
+                    <span className="install-path" title={installDir(rec.paths) ?? rec.target_dir}>
+                      {installDir(rec.paths) ?? rec.target_dir}
+                    </span>
                   </div>
                   <div className="install-buttons">
+                    {installDir(rec.paths) && (
+                      <button
+                        className="icon-btn"
+                        title={t("install.reveal")}
+                        onClick={() => reveal(rec.paths)}
+                      >
+                        <i className="bi bi-folder2-open" />
+                      </button>
+                    )}
                     <button
                       className="icon-btn"
                       title={t("install.update")}
