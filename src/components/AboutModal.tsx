@@ -23,7 +23,7 @@ export function AboutModal({ onClose }: { onClose: () => void }) {
       <div className="about">
         <img className="about-logo" src={appIcon} alt="" draggable={false} />
         <h3>Pluxel</h3>
-        <p className="about-ver">version 1.0.0</p>
+        <p className="about-ver">version 1.0.1</p>
         <p className="about-desc">{t("about.desc")}</p>
         <ul className="about-list">
           <li>{t("about.list1")}</li>
