@@ -26,6 +26,10 @@ interface Props {
   aeInstalls: AeInstallation[];
   onExportZip: () => void;
   onDetectAe: () => void;
+  autoUpdate: boolean;
+  onToggleAutoUpdate: (on: boolean) => void;
+  onCheckUpdate: () => void;
+  checkingUpdate: boolean;
   onClose: () => void;
 }
 
@@ -35,6 +39,10 @@ export function SettingsModal({
   aeInstalls,
   onExportZip,
   onDetectAe,
+  autoUpdate,
+  onToggleAutoUpdate,
+  onCheckUpdate,
+  checkingUpdate,
   onClose,
 }: Props) {
   const [dataDir, setDataDir] = useState("");
@@ -214,6 +222,21 @@ export function SettingsModal({
         )}
         <button className="btn" onClick={onDetectAe} disabled={busy}>
           <i className="bi bi-arrow-repeat" /> {t("settings.redetect")}
+        </button>
+      </section>
+
+      <section className="settings-section">
+        <h4>{t("settings.updates")}</h4>
+        <label className="toggle-row">
+          <input
+            type="checkbox"
+            checked={autoUpdate}
+            onChange={(e) => onToggleAutoUpdate(e.target.checked)}
+          />
+          <span>{t("settings.autoUpdate")}</span>
+        </label>
+        <button className="btn" onClick={onCheckUpdate} disabled={checkingUpdate}>
+          <i className="bi bi-arrow-repeat" /> {t("settings.checkUpdate")}
         </button>
       </section>
 

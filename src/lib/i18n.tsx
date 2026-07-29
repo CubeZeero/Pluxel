@@ -176,6 +176,16 @@ const JA: Dict = {
     "保管中の {count} 件をまとめて 1 つの .ppf に書き出します(読み込みは上の「パッケージ追加」から)。",
   "settings.exportAll": "ライブラリ全体を .ppf に書き出す",
   "settings.dataDir": "データ保管場所",
+  "settings.updates": "アップデート",
+  "settings.autoUpdate": "起動時に自動でアップデートを確認",
+  "settings.checkUpdate": "今すぐ確認",
+  "update.title": "アップデート",
+  "update.available": "新しいバージョン {version} が利用可能です。",
+  "update.upToDate": "お使いのバージョンは最新です。",
+  "update.failed": "アップデートの確認に失敗しました。",
+  "update.downloading": "ダウンロード中",
+  "update.installNow": "更新する",
+  "update.later": "後で",
   "settings.openFolder": "フォルダを開く",
 
   "about.desc":
@@ -381,6 +391,16 @@ const EN: Dict = {
     "Export all {count} package(s) to a single .ppf (import via “Add Package” above).",
   "settings.exportAll": "Export entire library to .ppf",
   "settings.dataDir": "Data location",
+  "settings.updates": "Updates",
+  "settings.autoUpdate": "Check for updates on startup",
+  "settings.checkUpdate": "Check now",
+  "update.title": "Update",
+  "update.available": "Version {version} is available.",
+  "update.upToDate": "You're on the latest version.",
+  "update.failed": "Failed to check for updates.",
+  "update.downloading": "Downloading",
+  "update.installNow": "Update",
+  "update.later": "Later",
   "settings.openFolder": "Open folder",
 
   "about.desc":

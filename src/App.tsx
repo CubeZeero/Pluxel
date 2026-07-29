@@ -18,11 +18,14 @@ import { AdminUnlockModal } from "./components/AdminUnlockModal";
 import { InstallTargetModal } from "./components/InstallTargetModal";
 import { BundleList } from "./components/BundleList";
 import { BundleDetail } from "./components/BundleDetail";
+import { UpdateModal } from "./components/UpdateModal";
+import { useUpdater } from "./lib/useUpdater";
 import "./App.css";
 
 export default function App() {
   const lib = useLibrary();
   const t = useT();
+  const updater = useUpdater();
 
   // View-only UI state.
   const [query, setQuery] = useState("");
@@ -321,10 +324,23 @@ export default function App() {
           aeInstalls={lib.aeInstalls}
           onExportZip={lib.exportLibraryZip}
           onDetectAe={lib.detectAe}
+          autoUpdate={updater.enabled}
+          onToggleAutoUpdate={updater.setEnabled}
+          onCheckUpdate={updater.checkNow}
+          checkingUpdate={updater.phase === "checking"}
           onClose={() => setShowSettings(false)}
         />
       )}
       {showAbout && <AboutModal onClose={() => setShowAbout(false)} />}
+
+      <UpdateModal
+        phase={updater.phase}
+        update={updater.update}
+        progress={updater.progress}
+        error={updater.error}
+        onInstall={updater.install}
+        onDismiss={updater.dismiss}
+      />
 
       {menu && (
         <ContextMenu

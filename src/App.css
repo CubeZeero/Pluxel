@@ -1441,6 +1441,55 @@ code {
 .modal-body {
   padding: 16px;
 }
+
+/* ---------- Update modal ---------- */
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+.update-msg {
+  margin: 0 0 10px;
+  font-size: 14px;
+}
+.update-notes,
+.update-error {
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--surface-2, rgba(127, 127, 127, 0.1));
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.update-error {
+  color: var(--danger, #f0616d);
+}
+.update-progress {
+  margin-top: 16px;
+}
+.update-bar {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--surface-2, rgba(127, 127, 127, 0.2));
+  overflow: hidden;
+}
+.update-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 0.15s ease;
+}
+.update-pct {
+  display: block;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
 .settings-section {
   margin-bottom: 20px;
 }
