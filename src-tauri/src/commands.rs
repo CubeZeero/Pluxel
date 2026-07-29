@@ -349,6 +349,42 @@ fn launch(path: &Path) -> AppResult<()> {
     Ok(())
 }
 
+/// Reveal a file or folder in the OS file manager (Finder / Explorer),
+/// selecting the item when it is a file. Used to show where a package was
+/// installed on disk.
+#[tauri::command]
+pub fn reveal_path(path: String) -> AppResult<()> {
+    let p = Path::new(&path);
+    if !p.exists() {
+        return Err(AppError::msg(format!("path not found: {path}")));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // `-R` reveals (selects) the item in Finder.
+        std::process::Command::new("open").arg("-R").arg(p).spawn()?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        // `/select,` opens Explorer with the item highlighted. The flag must stay
+        // unquoted while only the path is quoted — if std quotes the whole
+        // "/select,<path>" token (which it does when the path has spaces),
+        // Explorer ignores the flag and opens the default folder (Documents).
+        // Build the command line raw and normalise separators to backslashes.
+        let win = p.display().to_string().replace('/', "\\");
+        std::process::Command::new("explorer.exe")
+            .raw_arg(format!("/select,\"{win}\""))
+            .spawn()?;
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        // No portable "reveal and select"; open the containing folder instead.
+        let dir = p.parent().unwrap_or(p);
+        std::process::Command::new("xdg-open").arg(dir).spawn()?;
+    }
+    Ok(())
+}
+
 /// State of the admin (elevated-install) session.
 #[derive(serde::Serialize)]
 pub struct AdminStatus {

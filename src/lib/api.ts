@@ -50,6 +50,9 @@ export const api = {
 
   detectAe: () => invoke<AeInstallation[]>("detect_ae"),
 
+  /** Reveal a file/folder in Finder (macOS) or Explorer (Windows). */
+  revealPath: (path: string) => invoke<void>("reveal_path", { path }),
+
   adminStatus: () => invoke<{ supported: boolean; unlocked: boolean }>("admin_status"),
   adminUnlock: (password: string) => invoke<void>("admin_unlock", { password }),
   adminLock: () => invoke<void>("admin_lock"),

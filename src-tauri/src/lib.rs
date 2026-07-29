@@ -130,6 +130,7 @@ pub fn run() {
             commands::clear_banner,
             commands::read_banner,
             commands::detect_ae,
+            commands::reveal_path,
             commands::run_installer,
             commands::install_package,
             commands::install_packages,

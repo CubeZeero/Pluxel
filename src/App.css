@@ -339,9 +339,8 @@ img {
   font-size: 11px;
   opacity: 0.7;
 }
-.bundled-chip {
-  margin-left: auto;
-}
+/* Flows inline with the other chips so it wraps cleanly when the window is
+   narrow (no lone right-aligned second row). */
 .bundled-chip .bi {
   font-size: 12px;
 }
@@ -1213,6 +1212,25 @@ code {
 .installed-actions .btn {
   flex: 1;
   justify-content: center;
+}
+.install-location {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.install-abs-path {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text-faint);
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* install list */
