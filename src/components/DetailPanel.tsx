@@ -75,6 +75,15 @@ function DetailBody({
     paths.length ? paths[0].replace(/[/\\][^/\\]*$/, "") : null;
   const reveal = (paths: string[]) => paths[0] && api.revealPath(paths[0]);
 
+  // Copy a path to the clipboard, briefly flagging which row was copied.
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const copyPath = (key: string, path: string) => {
+    navigator.clipboard.writeText(path).then(() => {
+      setCopiedKey(key);
+      setTimeout(() => setCopiedKey((k) => (k === key ? null : k)), 1500);
+    });
+  };
+
   const [editing, setEditing] = useState(false);
   const [showBannerInfo, setShowBannerInfo] = useState(false);
 
@@ -364,6 +373,13 @@ function DetailBody({
                       </code>
                       <button
                         className="icon-btn"
+                        title={t("install.copyPath")}
+                        onClick={() => copyPath(selectedRecord.id, installDir(selectedRecord.paths)!)}
+                      >
+                        <i className={`bi ${copiedKey === selectedRecord.id ? "bi-check-lg" : "bi-clipboard"}`} />
+                      </button>
+                      <button
+                        className="icon-btn"
                         title={t("install.reveal")}
                         onClick={() => reveal(selectedRecord.paths)}
                       >
@@ -415,13 +431,22 @@ function DetailBody({
                   </div>
                   <div className="install-buttons">
                     {installDir(rec.paths) && (
-                      <button
-                        className="icon-btn"
-                        title={t("install.reveal")}
-                        onClick={() => reveal(rec.paths)}
-                      >
-                        <i className="bi bi-folder2-open" />
-                      </button>
+                      <>
+                        <button
+                          className="icon-btn"
+                          title={t("install.copyPath")}
+                          onClick={() => copyPath(rec.id, installDir(rec.paths)!)}
+                        >
+                          <i className={`bi ${copiedKey === rec.id ? "bi-check-lg" : "bi-clipboard"}`} />
+                        </button>
+                        <button
+                          className="icon-btn"
+                          title={t("install.reveal")}
+                          onClick={() => reveal(rec.paths)}
+                        >
+                          <i className="bi bi-folder2-open" />
+                        </button>
+                      </>
                     )}
                     <button
                       className="icon-btn"
