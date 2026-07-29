@@ -102,6 +102,13 @@ pub fn run() {
             let _ = app.emit("menu-action", event.id().as_ref());
         });
     }
+    // Auto-updater (desktop only): checks GitHub Releases and applies signed updates.
+    #[cfg(desktop)]
+    {
+        builder = builder
+            .plugin(tauri_plugin_updater::Builder::new().build())
+            .plugin(tauri_plugin_process::init());
+    }
     builder
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_opener::init())

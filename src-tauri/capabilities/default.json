@@ -8,6 +8,8 @@
     "opener:default",
     "dialog:default",
     "window-state:default",
+    "updater:default",
+    "process:default",
     {
       "identifier": "opener:allow-open-path",
       "allow": [{ "path": "$APPDATA/**" }, { "path": "$APPLOCALDATA/**" }]
