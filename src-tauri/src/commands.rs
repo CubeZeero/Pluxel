@@ -365,10 +365,15 @@ pub fn reveal_path(path: String) -> AppResult<()> {
     }
     #[cfg(target_os = "windows")]
     {
-        // `/select,` opens Explorer with the item highlighted. Passed as a single
-        // argument (no `cmd /C`) so there is no shell re-parsing / injection.
+        use std::os::windows::process::CommandExt;
+        // `/select,` opens Explorer with the item highlighted. The flag must stay
+        // unquoted while only the path is quoted — if std quotes the whole
+        // "/select,<path>" token (which it does when the path has spaces),
+        // Explorer ignores the flag and opens the default folder (Documents).
+        // Build the command line raw and normalise separators to backslashes.
+        let win = p.display().to_string().replace('/', "\\");
         std::process::Command::new("explorer.exe")
-            .arg(format!("/select,{}", p.display()))
+            .raw_arg(format!("/select,\"{win}\""))
             .spawn()?;
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
