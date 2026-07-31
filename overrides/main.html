@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+
+{#- Add Open Graph / Twitter card meta so shared links show the hero image. -#}
+{% block extrahead %}
+  {%- set page_title = config.site_name -%}
+  {%- set raw_title = "" -%}
+  {%- if page and page.meta and page.meta.title -%}
+    {%- set raw_title = page.meta.title -%}
+  {%- elif page and page.title -%}
+    {%- set raw_title = page.title | striptags -%}
+  {%- endif -%}
+  {%- if raw_title and raw_title != config.site_name -%}
+    {%- set page_title = raw_title ~ " - " ~ config.site_name -%}
+  {%- endif -%}
+  {%- set page_desc = config.site_description -%}
+  {%- if page and page.meta and page.meta.description -%}
+    {%- set page_desc = page.meta.description -%}
+  {%- endif -%}
+  {%- set og_image = (config.site_url | default("", true)) ~ "assets/hero.png" -%}
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="{{ config.site_name }}">
+  <meta property="og:title" content="{{ page_title }}">
+  <meta property="og:description" content="{{ page_desc }}">
+  <meta property="og:image" content="{{ og_image }}">
+  {%- if page and page.canonical_url %}
+  <meta property="og:url" content="{{ page.canonical_url }}">
+  {%- endif %}
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="{{ page_title }}">
+  <meta name="twitter:description" content="{{ page_desc }}">
+  <meta name="twitter:image" content="{{ og_image }}">
+{% endblock %}
