@@ -1677,6 +1677,12 @@ code {
   line-height: 1.9;
   font-size: 13px;
 }
+.about-links {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin: 0 0 18px;
+}
 .about-libs-title {
   margin: 6px 0 8px;
   font-size: 13px;

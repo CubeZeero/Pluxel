@@ -1,3 +1,4 @@
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { Modal } from "./Modal";
 import { useT } from "../lib/i18n";
 import appIcon from "../assets/app-icon.png";
@@ -30,6 +31,15 @@ export function AboutModal({ onClose }: { onClose: () => void }) {
           <li>{t("about.list2")}</li>
           <li>{t("about.list3")}</li>
         </ul>
+
+        <div className="about-links">
+          <button className="btn ghost xs" onClick={() => openUrl("https://pluxel.cubezeero.com")}>
+            <i className="bi bi-globe2" /> {t("about.website")}
+          </button>
+          <button className="btn ghost xs" onClick={() => openUrl("https://github.com/CubeZeero/Pluxel")}>
+            <i className="bi bi-github" /> GitHub
+          </button>
+        </div>
 
         <h4 className="about-libs-title">{t("about.libs")}</h4>
         <ul className="about-libs">
