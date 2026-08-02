@@ -1,6 +1,6 @@
 [package]
 name = "pluxel"
-version = "1.0.2"
+version = "1.1.0"
 description = "Storage vault and installer for After Effects scripts and plugins"
 authors = ["cubezeero"]
 license = "GPL-3.0-or-later"
