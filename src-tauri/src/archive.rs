@@ -115,6 +115,75 @@ pub fn export_package(store: &LibraryStore, id: &str, dest: &Path) -> AppResult<
     Ok(())
 }
 
+/// Build a distribution `.ppf` directly from `inputs` (files and/or folders),
+/// without going through the library store — used by the CLI. Produces the same
+/// layout as [`export_package`] (manifest.json + assets at the root), so the
+/// result imports back through [`import_archive`].
+pub fn write_ppf_from_paths(
+    dest: &Path,
+    manifest: &crate::models::Manifest,
+    inputs: &[std::path::PathBuf],
+) -> AppResult<()> {
+    let file = fs::File::create(dest)?;
+    let mut zip = zip::ZipWriter::new(file);
+    let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+    // manifest.json — omit tags (user-local); `install_as` carries the kind.
+    let mut manifest_json = serde_json::to_value(manifest)?;
+    if let Some(obj) = manifest_json.as_object_mut() {
+        obj.remove("tags");
+    }
+    zip.start_file("manifest.json", opts)?;
+    zip.write_all(serde_json::to_string_pretty(&manifest_json)?.as_bytes())?;
+
+    for input in inputs {
+        if !input.exists() {
+            return Err(AppError::msg(format!(
+                "no such file or folder: {}",
+                input.display()
+            )));
+        }
+        add_input(&mut zip, input, opts)?;
+    }
+    zip.finish()?;
+    Ok(())
+}
+
+/// Add a file (at the root) or a folder (preserving its own name as the top
+/// segment) to `zip`.
+fn add_input(
+    zip: &mut zip::ZipWriter<fs::File>,
+    input: &Path,
+    opts: SimpleFileOptions,
+) -> AppResult<()> {
+    if input.is_dir() {
+        let base = input.parent().unwrap_or(Path::new(""));
+        for entry in WalkDir::new(input).min_depth(1) {
+            let entry = entry.map_err(|e| AppError::msg(e.to_string()))?;
+            let rel = entry
+                .path()
+                .strip_prefix(base)
+                .map_err(|e| AppError::msg(e.to_string()))?;
+            let name = rel.to_string_lossy().replace('\\', "/");
+            if entry.file_type().is_dir() {
+                zip.add_directory(format!("{name}/"), opts)?;
+            } else {
+                zip.start_file(&name, opts)?;
+                zip.write_all(&fs::read(entry.path())?)?;
+            }
+        }
+    } else {
+        let name = input
+            .file_name()
+            .ok_or_else(|| AppError::msg("invalid file path".to_string()))?
+            .to_string_lossy()
+            .to_string();
+        zip.start_file(&name, opts)?;
+        zip.write_all(&fs::read(input)?)?;
+    }
+    Ok(())
+}
+
 /// Write a package's distribution content (manifest without tags, banner, and
 /// files) into `zip` under `prefix` (e.g. `""` or `"packages/Foo/"`).
 fn write_distribution(

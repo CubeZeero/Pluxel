@@ -652,3 +652,59 @@ fn distribution_export_omits_tags_in_every_manifest() {
     // Both the Pluxel root manifest and the bundled nested one were checked.
     assert!(manifests_seen >= 2, "expected >=2 manifest.json entries, saw {manifests_seen}");
 }
+
+#[test]
+fn cli_ppf_roundtrips_through_import() {
+    let work = tmp("work-cli");
+    let jsx = work.join("MyEffect.jsx");
+    fs::write(&jsx, "// effect").unwrap();
+    let ffx = work.join("Preset.ffx");
+    fs::write(&ffx, b"ffx data").unwrap();
+
+    let manifest = crate::models::Manifest {
+        name: "My Effect".into(),
+        version: "1.0.0".into(),
+        author: "cubezeero".into(),
+        description: String::new(),
+        homepage: String::new(),
+        tags: Vec::new(),
+        install_as: Some(PackageKind::Script),
+    };
+    let ppf = work.join("MyEffect.ppf");
+    archive::write_ppf_from_paths(&ppf, &manifest, &[jsx.clone(), ffx.clone()]).unwrap();
+    assert!(ppf.exists());
+
+    // The generated .ppf imports back like any distribution package.
+    let store = LibraryStore::new(tmp("store-cli")).unwrap();
+    let imported = archive::import_archive(&store, &ppf).unwrap();
+    assert_eq!(imported.len(), 1);
+    let p = &imported[0];
+    assert_eq!(p.manifest.name, "My Effect");
+    assert_eq!(p.manifest.version, "1.0.0");
+    assert_eq!(p.kind, PackageKind::Script);
+    assert!(p.manifest.tags.is_empty()); // no tags in distribution
+    assert!(store.files_dir(&p.id).join("MyEffect.jsx").exists());
+    assert!(store.files_dir(&p.id).join("Preset.ffx").exists());
+}
+
+#[test]
+fn cli_run_parses_args_and_detects_kind() {
+    let work = tmp("work-clirun");
+    let jsx = work.join("Foo.jsx");
+    fs::write(&jsx, "// foo").unwrap();
+    let out = work.join("Foo.ppf");
+    let code = crate::cli::run(&[
+        "--name".into(),
+        "Foo".into(),
+        "--version".into(),
+        "1.0.0".into(),
+        "--out".into(),
+        out.to_string_lossy().into_owned(),
+        jsx.to_string_lossy().into_owned(),
+    ]);
+    assert_eq!(code, 0);
+    assert!(out.exists());
+
+    // Missing --name is an error (non-zero exit).
+    assert_ne!(crate::cli::run(&[jsx.to_string_lossy().into_owned()]), 0);
+}

@@ -32,6 +32,11 @@ thiserror = "2"
 dirs = "6"
 base64 = "0.22"
 
+# For the CLI (`pluxel package`) to print to the parent console on Windows,
+# where the release build is a GUI-subsystem app.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60", features = ["Win32_System_Console"] }
+
 [profile.release]
 panic = "abort"
 codegen-units = 1

@@ -1,5 +1,6 @@
 mod ae;
 mod archive;
+pub mod cli;
 mod commands;
 mod error;
 mod importer;
