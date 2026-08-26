@@ -134,6 +134,7 @@ pub fn run() {
             commands::reveal_path,
             commands::run_installer,
             commands::install_package,
+            commands::install_all_ae,
             commands::install_packages,
             commands::uninstall_package,
             commands::export_library,

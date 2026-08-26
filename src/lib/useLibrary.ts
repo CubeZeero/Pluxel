@@ -332,6 +332,21 @@ export function useLibrary() {
     [withBusy, withElevation, refresh, notify, t],
   );
 
+  /** Install one package into every detected AE version at once (one elevation). */
+  const installAll = useCallback(
+    (pkg: Package) =>
+      withBusy(async () => {
+        const updated = (await withElevation(
+          (elevated) => api.installAllAe(pkg.id, { elevated, effect_subdir: effectsSubdir() }),
+          { message: t("elevate.msg"), okLabel: t("elevate.ok") },
+        )) as Package | null;
+        if (!updated) return;
+        await refresh();
+        notify(t("toast.installedAllAe", { name: pkg.manifest.name, count: aeInstalls.length }), "success");
+      }),
+    [withBusy, withElevation, refresh, notify, t, aeInstalls.length],
+  );
+
   /** Install several selected packages to one AE target in a single batch (one
    * elevation prompt). Already-installed packages at that target are updated. */
   const installSelected = useCallback(
@@ -632,6 +647,7 @@ export function useLibrary() {
     detectAe,
     runInstaller,
     install,
+    installAll,
     installSelected,
     uninstall,
     saveManifest,

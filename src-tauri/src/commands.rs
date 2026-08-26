@@ -560,6 +560,84 @@ pub fn install_package(app: AppHandle, id: String, params: InstallParams) -> App
     install_one(&store, &id, &params)
 }
 
+/// Install one package into **every detected After Effects installation** at
+/// once. When elevated, all targets are written in a single elevated batch (one
+/// prompt); otherwise each is installed directly.
+#[tauri::command]
+pub fn install_all_ae(app: AppHandle, id: String, params: InstallParams) -> AppResult<Package> {
+    let store = store(&app)?;
+    if let Some(sub) = params.effect_subdir.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if !crate::library::is_safe_segment(sub) {
+            return Err(AppError::msg("エフェクトのサブフォルダ名が不正です"));
+        }
+    }
+    let aes = ae::detect_installations();
+    if aes.is_empty() {
+        return Err(AppError::msg("After Effects が見つかりません"));
+    }
+    install_to_all(&store, &id, &aes, &params)
+}
+
+/// Core of [`install_all_ae`], taking an explicit AE list so it can be tested
+/// without on-disk detection.
+pub(crate) fn install_to_all(
+    store: &LibraryStore,
+    id: &str,
+    aes: &[AeInstallation],
+    params: &InstallParams,
+) -> AppResult<Package> {
+    let effect_subdir = params.effect_subdir.as_deref().filter(|s| !s.trim().is_empty());
+    let mut pkg = store.get(id)?;
+    let primary = params.kind.unwrap_or(pkg.kind);
+
+    if params.elevated.unwrap_or(false) {
+        // Plan every AE's copies, then perform them all in one elevated write.
+        let files_dir = store.files_dir(id);
+        let mut all_copies: Vec<(PathBuf, PathBuf)> = Vec::new();
+        let mut records: Vec<InstallRecord> = Vec::new();
+        for ae in aes {
+            let (copies, written) = installer::plan_copies(&files_dir, |p| {
+                installer::route(ae, installer::entry_kind(p), primary, effect_subdir)
+            })?;
+            let target = installer::route(ae, primary, primary, effect_subdir)
+                .to_string_lossy()
+                .to_string();
+            all_copies.extend(copies);
+            records.push(InstallRecord {
+                id: uuid::Uuid::new_v4().to_string(),
+                label: ae.name.clone(),
+                kind: primary,
+                target_dir: target,
+                ae: Some(ae.clone()),
+                paths: written,
+                installed_at: now(),
+            });
+        }
+        installer::elevated_copy(&all_copies)?;
+        for record in records {
+            pkg.installs.retain(|r| r.target_dir != record.target_dir);
+            pkg.installs.push(record);
+        }
+        store.upsert(pkg.clone())?;
+        Ok(pkg)
+    } else {
+        // Non-elevated: install to each AE directly (a write to a protected
+        // folder surfaces the same permission error, driving the elevation retry).
+        for ae in aes {
+            let one = InstallParams {
+                installation: Some(ae.clone()),
+                kind: params.kind,
+                custom_dir: None,
+                label: None,
+                elevated: Some(false),
+                effect_subdir: params.effect_subdir.clone(),
+            };
+            pkg = install_one(store, id, &one)?;
+        }
+        Ok(pkg)
+    }
+}
+
 /// Remove an installed copy: delete the written files and drop its record.
 /// Removal errors are surfaced (not ignored); a permission failure signals the
 /// frontend to retry with `elevated`. The record is only dropped once every

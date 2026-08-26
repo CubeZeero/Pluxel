@@ -708,3 +708,31 @@ fn cli_run_parses_args_and_detects_kind() {
     // Missing --name is an error (non-zero exit).
     assert_ne!(crate::cli::run(&[jsx.to_string_lossy().into_owned()]), 0);
 }
+
+#[test]
+fn install_to_all_targets_every_ae() {
+    let work = tmp("work-all");
+    let jsx = work.join("Tool.jsx");
+    fs::write(&jsx, "// tool").unwrap();
+
+    let store = LibraryStore::new(tmp("store-all")).unwrap();
+    let pkg = importer::import_path(&store, &jsx).unwrap();
+
+    let ae1 = tmp("ae-all-1");
+    let ae2 = tmp("ae-all-2");
+    let aes = vec![fake_ae(&ae1), fake_ae(&ae2)];
+    let params = crate::commands::InstallParams {
+        installation: None,
+        kind: None,
+        custom_dir: None,
+        label: None,
+        elevated: Some(false),
+        effect_subdir: None,
+    };
+    let out = crate::commands::install_to_all(&store, &pkg.id, &aes, &params).unwrap();
+
+    // The script landed in both AEs' Scripts folders, with one record per AE.
+    assert!(ae1.join("Scripts/Tool.jsx").exists());
+    assert!(ae2.join("Scripts/Tool.jsx").exists());
+    assert_eq!(out.installs.len(), 2);
+}

@@ -62,6 +62,9 @@ export const api = {
   installPackage: (id: string, params: InstallParams) =>
     invoke<Package>("install_package", { id, params }),
 
+  installAllAe: (id: string, params: InstallParams) =>
+    invoke<Package>("install_all_ae", { id, params }),
+
   installPackages: (ids: string[], params: InstallParams) =>
     invoke<Package[]>("install_packages", { ids, params }),
 

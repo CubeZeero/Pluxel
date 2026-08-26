@@ -25,6 +25,7 @@ interface Props {
   aeInstalls: AeInstallation[];
   busy: boolean;
   onInstall: (pkg: Package, params: InstallParams) => void;
+  onInstallAll: (pkg: Package) => void;
   onUninstall: (pkg: Package, recordId: string) => void;
   onSaveManifest: (id: string, manifest: Manifest) => void;
   onSetBanner: (id: string) => void;
@@ -52,6 +53,7 @@ function DetailBody({
   aeInstalls,
   busy,
   onInstall,
+  onInstallAll,
   onUninstall,
   onSaveManifest,
   onSetBanner,
@@ -127,7 +129,9 @@ function DetailBody({
   };
 
   const doInstall = () => {
-    if (aeSel.startsWith("custom:")) {
+    if (aeSel === "all") {
+      onInstallAll(pkg);
+    } else if (aeSel.startsWith("custom:")) {
       const dir = customDirs[Number(aeSel.slice(7))];
       if (dir) onInstall(pkg, { custom_dir: dir });
     } else {
@@ -349,6 +353,9 @@ function DetailBody({
             <>
               <label className="field">
                 <select value={aeSel} onChange={(e) => setAeSel(e.target.value)}>
+                  {aeInstalls.length > 1 && (
+                    <option value="all">{t("install.allAe", { count: aeInstalls.length })}</option>
+                  )}
                   {aeInstalls.map((ae, i) => (
                     <option key={ae.root} value={String(i)}>
                       {ae.name}

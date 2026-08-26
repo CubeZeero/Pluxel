@@ -278,6 +278,7 @@ export default function App() {
             aeInstalls={lib.aeInstalls}
             busy={lib.busy}
             onInstall={lib.install}
+            onInstallAll={lib.installAll}
             onUninstall={lib.uninstall}
             onSaveManifest={lib.saveManifest}
             onSetBanner={lib.setBanner}
