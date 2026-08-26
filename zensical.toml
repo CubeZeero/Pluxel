@@ -59,6 +59,7 @@ nav = [
     { "インストール・更新" = "usage/install-update.md" },
     { "詳細の編集" = "usage/edit-details.md" },
     { "パッケージの作成" = "usage/create-package.md" },
+    { "コマンドライン" = "usage/cli.md" },
   ] },
   { "FAQ" = "faq.md" },
   { "更新履歴" = "changelog.md" },

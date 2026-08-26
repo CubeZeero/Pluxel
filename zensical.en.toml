@@ -63,6 +63,7 @@ nav = [
     { "Install & update" = "usage/install-update.md" },
     { "Editing details" = "usage/edit-details.md" },
     { "Creating packages" = "usage/create-package.md" },
+    { "Command line" = "usage/cli.md" },
   ] },
   { "FAQ" = "faq.md" },
   { "Changelog" = "changelog.md" },

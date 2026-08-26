@@ -23,6 +23,11 @@ icon: material/cog-play
     Add a custom install folder in Settings to place items somewhere other
     than After Effects.
 
+!!! tip "Install into every After Effects at once"
+    When several After Effects versions are detected, choose
+    **"All After Effects"** as the target to install into all of them at once
+    (with a single confirmation even when admin privileges are needed).
+
 ## Batch install
 
 Select items in multi-select mode and install them all in one action. Even
