@@ -40,3 +40,10 @@ install time.
 Even for the same `.jsx`, After Effects distinguishes files that go in
 **Scripts** from those in **ScriptUI Panels**. Pluxel manages them by type
 and installs each into the correct folder.
+
+## Preview and documentation
+
+A preview is shown before registering files. Review the contents and confirm to import.
+Add PDF manuals and other documentation through **Add files** in the detail panel after registering an item.
+Documentation alone cannot be registered as an independent script or plugin.
+Documentation is stored and distributed with the package, but is not installed into AE.

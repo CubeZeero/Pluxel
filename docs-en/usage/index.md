@@ -27,3 +27,9 @@ icon: lucide/book-open
 </div>
 
 New here? Start with **[Installing the app](install.md)** and read on in order.
+
+## Management & appearance
+
+- [Integrity, revisions & history](maintenance.md)
+- [Appearance & colors](appearance.md)
+- [Command line](cli.md)

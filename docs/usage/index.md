@@ -27,3 +27,9 @@ icon: lucide/book-open
 </div>
 
 はじめての方は **[アプリのインストール](install.md)** から順に読むのがおすすめです。
+
+## 管理・表示の設定
+
+- [整合性・復元・操作履歴](maintenance.md)
+- [表示・色の設定](appearance.md)
+- [コマンドライン](cli.md)

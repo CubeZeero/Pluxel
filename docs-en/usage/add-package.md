@@ -13,8 +13,13 @@ manifest information (name, author, version, type, and so on).
 - **Drag & drop** — Drop a `.ppf` file onto the window
 - **From the menu** — Top menu **File → Add package (.ppf)**
 
-On import, the items in the package are registered into your library, and the
-manifest information (banner image, author, version, tags, etc.) is restored.
+Before importing, a preview shows the packages, bundles and included files.
+Choose **Import** to confirm or cancel to leave the library unchanged.
+
+Confirmation registers the items and their manifest information (banner, author, version, type and so on).
+Normal distribution packages do not contain personal tags. A full-library backup restores tags as well.
+If a duplicate exists, choose whether to skip it or replace the existing item as an update.
+Importing does not execute scripts or installers.
 
 ## Packages and backups
 

@@ -60,6 +60,8 @@ nav = [
     { "詳細の編集" = "usage/edit-details.md" },
     { "パッケージの作成" = "usage/create-package.md" },
     { "コマンドライン" = "usage/cli.md" },
+    { "整合性・復元・操作履歴" = "usage/maintenance.md" },
+    { "表示・色の設定" = "usage/appearance.md" },
   ] },
   { "FAQ" = "faq.md" },
   { "更新履歴" = "changelog.md" },

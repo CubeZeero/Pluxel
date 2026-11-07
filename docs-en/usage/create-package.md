@@ -29,3 +29,15 @@ to restore everything.
 ## Importing
 
 To import an exported `.ppf`, see [Adding packages](add-package.md).
+
+## Create a bundle or add to one
+
+1. Enter multi-select mode in the package list and select items.
+2. Press **Bundle actions** in the selection bar.
+3. Enter a name under **Create new**, or choose a destination under **Add to existing**.
+4. Confirm. Your selection is preserved if the action fails.
+5. Enter edit mode in the bundle detail panel to export it for distribution.
+
+Bundles can have their own banner, author and URL. Personal tags are omitted from single-package and bundle distributions.
+Full-library backups include bundles and tags.
+Included PDF manuals and other documentation also travel inside the PPF. See [Import preview](add-package.md) for the recipient's workflow.
