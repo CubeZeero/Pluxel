@@ -62,6 +62,47 @@ export interface Library {
   bundles: Bundle[];
 }
 
+export interface PreparedImport {
+  token: string;
+  packages: Package[];
+  bundles: Bundle[];
+}
+
+export interface ActivityEvent {
+  id: string;
+  at: string;
+  action: string;
+  package_id?: string | null;
+  name: string;
+  version: string;
+  detail: string;
+}
+
+export interface Revision {
+  id: string;
+  name: string;
+  version: string;
+  created_at: string;
+  reason: string;
+}
+
+export interface IntegrityEntry {
+  package_id: string;
+  package_name: string;
+  record_id: string;
+  label: string;
+  path: string;
+  status: "ok" | "missing" | "changed" | "unverified" | "unreadable" | "unsupported";
+  detail: string;
+}
+
+export interface InstallConflict {
+  path: string;
+  package_name: string;
+  other_name: string;
+  reason: "owned" | "existing" | "modified" | "selection";
+}
+
 /** Kinds eligible for bundling / batch install: everything that is copy-installed
  * into AE (scripts, ScriptUI panels, effect plugins, .zxp). Native installers
  * (.pkg/.exe/.msi) are run individually, not bundled or batch-installed. */

@@ -1,0 +1,25 @@
+.maintenance { min-width: 0; line-height: 1.5; }
+.maintenance-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.maintenance p { margin: 8px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.maintenance h3 { margin: 0 0 8px; font-size: 14px; overflow-wrap: anywhere; }
+.maintenance-card { border: 1px solid var(--line-2); border-radius: 4px; padding: 12px; margin: 12px 0; min-width: 0; }
+.maintenance-list { list-style: none; padding: 0; margin: 0; }
+.maintenance-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; overflow-wrap: anywhere; }
+.maintenance time, .maintenance-detail, .maintenance dt { color: var(--text-dim); font-size: 12px; }
+.maintenance-meta { margin: 0 0 12px; }
+.maintenance-meta > div { display: grid; grid-template-columns: 100px minmax(0, 1fr); gap: 8px; margin: 4px 0; }
+.maintenance dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.maintenance dd, .maintenance-path, .maintenance-detail, .maintenance-files { user-select: text; -webkit-user-select: text; }
+.maintenance-notice { padding: 10px 12px; border: 1px solid var(--line-2); border-radius: 4px; background: var(--bg-3); }
+.maintenance summary { cursor: pointer; padding: 6px 0; }
+.maintenance-files { max-height: 200px; overflow: auto; padding: 8px 8px 8px 24px; margin: 0; border: 1px solid var(--line); border-radius: 4px; }
+.maintenance-files li { overflow-wrap: anywhere; padding: 3px 0; }
+.maintenance-files li span { margin-left: 12px; color: var(--text-dim); font-size: 12px; }
+.maintenance-path { display: block; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.maintenance-status { border: 1px solid var(--line-2); padding: 2px 7px; border-radius: 4px; font-size: 12px; }
+.maintenance-check { display: flex; align-items: center; gap: 8px; margin: 12px 0; }
+.maintenance-check input { accent-color: var(--accent); }
+.maintenance-conflicts { max-height: 45vh; overflow: auto; }
+.maintenance :is(button, input, summary, [tabindex]):focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+.maintenance .modal-actions { flex-wrap: wrap; }
+@media (max-width: 480px) { .maintenance-meta > div { grid-template-columns: 1fr; gap: 0; } }

@@ -16,10 +16,12 @@ import { FilterBar } from "./components/FilterBar";
 import { ConfirmDialog } from "./components/ConfirmDialog";
 import { AdminUnlockModal } from "./components/AdminUnlockModal";
 import { InstallTargetModal } from "./components/InstallTargetModal";
+import { SelectFooter } from "./components/SelectFooter";
 import { BundleList } from "./components/BundleList";
 import { BundleDetail } from "./components/BundleDetail";
 import { UpdateModal } from "./components/UpdateModal";
 import { useUpdater } from "./lib/useUpdater";
+import { ImportPreviewModal, IntegrityModal, HistoryModal, RevisionsModal, ConflictModal } from "./components/MaintenanceModals";
 import "./App.css";
 
 export default function App() {
@@ -39,7 +41,6 @@ export default function App() {
   );
   const [selectMode, setSelectMode] = useState(false);
   const [bundleSel, setBundleSel] = useState<Set<string>>(new Set());
-  const [addTarget, setAddTarget] = useState<string>("");
   const [installTargetOpen, setInstallTargetOpen] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
@@ -142,11 +143,12 @@ export default function App() {
   }, [visible, query, activeKinds]);
 
   // Install the checked packages into one AE target, then exit select mode.
-  const runInstallSelected = (ae: AeInstallation) => {
-    lib.installSelected([...bundleSel], ae);
+  const runInstallSelected = async (ae: AeInstallation) => {
     setInstallTargetOpen(false);
-    setSelectMode(false);
-    setBundleSel(new Set());
+    if (await lib.installSelected([...bundleSel], ae)) {
+      setSelectMode(false);
+      setBundleSel(new Set());
+    }
   };
 
   return (
@@ -208,71 +210,30 @@ export default function App() {
               }
             />
             {selectMode && (
-              <div className="library-footer select-footer">
-                <span className="select-count">
-                  {t("select.count", { count: bundleSel.size })}
-                </span>
-                <div className="select-actions">
-                  <button className="btn ghost" onClick={() => setBundleSel(new Set())}>
-                    {t("select.clear")}
-                  </button>
-                  <button
-                    className="btn"
-                    disabled={bundleSel.size === 0 || lib.busy || lib.aeInstalls.length === 0}
-                    title={lib.aeInstalls.length === 0 ? t("settings.aeNone") : undefined}
-                    onClick={() => {
-                      if (lib.aeInstalls.length === 1) runInstallSelected(lib.aeInstalls[0]);
-                      else setInstallTargetOpen(true);
-                    }}
-                  >
-                    <i className="bi bi-download" /> {t("select.install")}
-                  </button>
-                  {lib.bundles.length > 0 && (
-                    <div className="select-add-existing">
-                      <select
-                        value={addTarget}
-                        onChange={(e) => setAddTarget(e.target.value)}
-                      >
-                        <option value="">{t("select.chooseBundle")}</option>
-                        {lib.bundles.map((b) => (
-                          <option key={b.id} value={b.id}>
-                            {b.name}
-                          </option>
-                        ))}
-                      </select>
-                      <button
-                        className="btn"
-                        disabled={!addTarget || bundleSel.size === 0 || lib.busy}
-                        onClick={() => {
-                          lib.addToBundle(addTarget, [...bundleSel]);
-                          setMode("bundles");
-                          setSelectMode(false);
-                          setBundleSel(new Set());
-                          setAddTarget("");
-                        }}
-                      >
-                        <i className="bi bi-plus-lg" /> {t("select.addToBundle")}
-                      </button>
-                    </div>
-                  )}
-                  <button
-                    className="btn primary-btn"
-                    disabled={bundleSel.size === 0 || lib.busy}
-                    onClick={() => {
-                      lib.createBundle(t("bundle.untitled"), [...bundleSel]);
-                      setMode("bundles");
-                      setSelectMode(false);
-                      setBundleSel(new Set());
-                    }}
-                  >
-                    <i className="bi bi-collection" /> {t("select.createBundle")}
-                  </button>
-                </div>
-              </div>
+              <SelectFooter
+                count={bundleSel.size}
+                busy={lib.busy}
+                canInstall={lib.aeInstalls.length > 0}
+                bundles={lib.bundles}
+                onClear={() => setBundleSel(new Set())}
+                onInstall={() => {
+                  if (lib.aeInstalls.length === 1) runInstallSelected(lib.aeInstalls[0]);
+                  else setInstallTargetOpen(true);
+                }}
+                onCreate={(name) => lib.createBundle(name, [...bundleSel])}
+                onAdd={(id) => lib.addToBundle(id, [...bundleSel])}
+                onBundled={() => {
+                  setMode("bundles");
+                  setSelectMode(false);
+                  setBundleSel(new Set());
+                }}
+              />
             )}
           </div>
 
           <DetailPanel
+            onCheckIntegrity={lib.checkIntegrity}
+            onShowRevisions={lib.showRevisions}
             key={lib.selected?.id ?? "none"}
             pkg={lib.selected}
             aeInstalls={lib.aeInstalls}
@@ -282,6 +243,7 @@ export default function App() {
             onUninstall={lib.uninstall}
             onSaveManifest={lib.saveManifest}
             onSetBanner={lib.setBanner}
+            onSetBannerClipboard={lib.setBannerFromClipboard}
             onClearBanner={lib.clearBanner}
             onAddFiles={lib.addFiles}
             onAddFolder={lib.addFolder}
@@ -295,7 +257,8 @@ export default function App() {
       ) : (
         <div className="body">
           <BundleList
-            bundles={lib.bundles}
+            bundles={lib.bundles.filter((bundle) => !query.trim() || [bundle.name, bundle.author, bundle.description, bundle.homepage].some((text) => text.toLowerCase().includes(query.trim().toLowerCase())))}
+            totalCount={lib.bundles.length}
             selectedId={lib.selectedBundleId}
             busy={lib.busy}
             viewMode={viewMode}
@@ -313,6 +276,7 @@ export default function App() {
             onExport={lib.exportBundle}
             onDelete={lib.removeBundle}
             onSetBanner={lib.setBundleBanner}
+            onSetBannerClipboard={lib.setBundleBannerFromClipboard}
             onClearBanner={lib.clearBundleBanner}
           />
         </div>
@@ -320,6 +284,8 @@ export default function App() {
 
       {showSettings && (
         <SettingsModal
+          onCheckIntegrity={() => { setShowSettings(false); lib.checkIntegrity(); }}
+          onShowHistory={() => { setShowSettings(false); lib.showHistory(); }}
           busy={lib.busy}
           packageCount={lib.packages.length}
           aeInstalls={lib.aeInstalls}
@@ -367,6 +333,12 @@ export default function App() {
       {lib.confirmState && (
         <ConfirmDialog {...lib.confirmState} onResult={lib.resolveConfirm} />
       )}
+
+      {lib.importPreview && <ImportPreviewModal preview={lib.importPreview} busy={false} onConfirm={() => lib.resolvePreview(true)} onCancel={() => lib.resolvePreview(false)} />}
+      {lib.installConflicts && <ConflictModal conflicts={lib.installConflicts} onResult={lib.resolveConflicts} />}
+      {lib.integrity && <IntegrityModal entries={lib.integrity} onClose={lib.closeIntegrity} />}
+      {lib.history && <HistoryModal events={lib.history} onClose={lib.closeHistory} />}
+      {lib.revisionView && <RevisionsModal {...lib.revisionView} busy={lib.busy} onRestore={lib.restoreRevision} onClose={lib.closeRevisions} />}
 
       {lib.adminModal && (
         <AdminUnlockModal onSubmit={lib.submitAdminUnlock} onCancel={lib.cancelAdminUnlock} />

@@ -14,6 +14,19 @@ export const topSeg = (p: string) => {
   return i < 0 ? null : p.slice(0, i);
 };
 
+/** Mirrors assets::primary: protect the body and every containing folder. */
+export function primaryAssetPath(pkg: Package): string | null {
+  const kind = pkg.kind === "script-ui-panel" ? "script" : pkg.kind;
+  if (kind === "plugin") {
+    for (const file of pkg.files) {
+      const parts = file.rel_path.split("/");
+      const index = parts.findIndex(isBundleSeg);
+      if (index >= 0) return parts.slice(0, index + 1).join("/");
+    }
+  }
+  return (pkg.files.find((file) => file.kind === kind) ?? pkg.files[0])?.rel_path ?? null;
+}
+
 /**
  * Count files the way a user perceives them: every inner file of a `.plugin`
  * bundle collapses into a single count, while ordinary files each count once.

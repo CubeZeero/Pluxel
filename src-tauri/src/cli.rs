@@ -169,11 +169,64 @@ fn detect_kind(inputs: &[PathBuf]) -> PackageKind {
         consider(input);
         if input.is_dir() {
             for entry in WalkDir::new(input).min_depth(1).into_iter().flatten() {
-                if entry.file_type().is_file() {
+                if entry.file_type().is_file() || entry.file_type().is_dir() {
                     consider(entry.path());
                 }
             }
         }
     }
     best
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::io::Read;
+
+    #[test]
+    fn parent_folder_plugin_autodetection_and_nested_tags_round_trip() {
+        let root = std::env::temp_dir().join(format!("cli-plugin-{}", uuid::Uuid::new_v4()));
+        let input = root.join("Release");
+        let binary = input.join("Foo.plugin/Contents/MacOS/Foo");
+        fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        fs::write(&binary, b"binary").unwrap();
+        fs::write(
+            input.join("manifest.json"),
+            r#"{"name":"Foo","tags":["private-client"],"version":"1"}"#,
+        )
+        .unwrap();
+        assert_eq!(detect_kind(&[input.clone()]), PackageKind::Plugin);
+        let out = root.join("Foo.ppf");
+        assert!(run_inner(&[
+            "--name".into(),
+            "Foo".into(),
+            "--out".into(),
+            out.to_string_lossy().into(),
+            input.to_string_lossy().into()
+        ])
+        .is_ok());
+        let mut zip = zip::ZipArchive::new(fs::File::open(&out).unwrap()).unwrap();
+        for name in ["manifest.json", "Release/manifest.json"] {
+            let mut text = String::new();
+            zip.by_name(name)
+                .unwrap()
+                .read_to_string(&mut text)
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert!(value.get("tags").is_none());
+            if name == "manifest.json" {
+                assert_eq!(value["install_as"], "plugin");
+            } else {
+                assert_eq!(value["version"], "1");
+            }
+        }
+        let store = crate::library::LibraryStore::new(root.join("library")).unwrap();
+        let packages = archive::import_archive(&store, &out).unwrap();
+        assert_eq!(packages[0].kind, PackageKind::Plugin);
+        assert!(packages[0].manifest.tags.is_empty());
+        assert_eq!(fs::read(&binary).unwrap(), b"binary");
+        drop(zip);
+        fs::remove_dir_all(root).unwrap();
+    }
 }

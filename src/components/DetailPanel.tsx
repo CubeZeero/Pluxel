@@ -21,6 +21,8 @@ import {
 } from "../types";
 
 interface Props {
+  onCheckIntegrity: (id: string) => void;
+  onShowRevisions: (pkg: Package) => void;
   pkg: Package | null;
   aeInstalls: AeInstallation[];
   busy: boolean;
@@ -29,6 +31,7 @@ interface Props {
   onUninstall: (pkg: Package, recordId: string) => void;
   onSaveManifest: (id: string, manifest: Manifest) => void;
   onSetBanner: (id: string) => void;
+  onSetBannerClipboard: (id: string) => void;
   onClearBanner: (id: string) => void;
   onAddFiles: (id: string) => void;
   onAddFolder: (id: string) => void;
@@ -49,6 +52,8 @@ export function DetailPanel(props: Props) {
 }
 
 function DetailBody({
+  onCheckIntegrity,
+  onShowRevisions,
   pkg,
   aeInstalls,
   busy,
@@ -57,6 +62,7 @@ function DetailBody({
   onUninstall,
   onSaveManifest,
   onSetBanner,
+  onSetBannerClipboard,
   onClearBanner,
   onAddFiles,
   onAddFolder,
@@ -98,10 +104,12 @@ function DetailBody({
   const [tags, setTags] = useState(m.tags.join(", "));
   const [installAs, setInstallAs] = useState<PackageKind>(pkg.kind);
 
-  // Install target: an AE index, or "custom:<i>" for a folder set in Settings.
+  // Stable path keys survive AE detection and custom-folder reordering.
   const [aeSel, setAeSel] = useState<string>(
-    aeInstalls.length ? "0" : customDirs.length ? "custom:0" : "0",
+    aeInstalls[0] ? `ae:${aeInstalls[0].root}` : customDirs[0] ? `custom:${customDirs[0]}` : "",
   );
+  const choices = [...aeInstalls.map((ae) => `ae:${ae.root}`), ...customDirs.map((dir) => `custom:${dir}`)];
+  const activeTarget = aeSel === "all" && aeInstalls.length > 1 ? "all" : choices.includes(aeSel) ? aeSel : choices[0] ?? "";
 
   const save = () => {
     onSaveManifest(pkg.id, {
@@ -129,22 +137,23 @@ function DetailBody({
   };
 
   const doInstall = () => {
-    if (aeSel === "all") {
+    if (activeTarget === "all") {
       onInstallAll(pkg);
-    } else if (aeSel.startsWith("custom:")) {
-      const dir = customDirs[Number(aeSel.slice(7))];
+    } else if (activeTarget.startsWith("custom:")) {
+      const dir = customDirs.find((dir) => `custom:${dir}` === activeTarget);
       if (dir) onInstall(pkg, { custom_dir: dir });
     } else {
-      const ae = aeInstalls[Number(aeSel)];
+      const ae = aeInstalls.find((ae) => `ae:${ae.root}` === activeTarget);
       if (ae) onInstall(pkg, { installation: ae });
     }
   };
 
   // Install state for the currently-selected target (an AE installation).
-  const selectedAe = aeSel.startsWith("custom:") ? null : aeInstalls[Number(aeSel)];
+  const selectedAe = aeInstalls.find((ae) => `ae:${ae.root}` === activeTarget) ?? null;
+  const selectedCustomDir = customDirs.find((dir) => `custom:${dir}` === activeTarget) ?? null;
   const selectedRecord = selectedAe
     ? pkg.installs.find((r) => r.ae?.root === selectedAe.root) ?? null
-    : null;
+    : selectedCustomDir ? pkg.installs.find((r) => !r.ae && r.target_dir === selectedCustomDir) ?? null : null;
   // Native installers have no target; a record just means "user ran it".
   const installerRecord = pkg.installs.find((r) => r.kind === "installer") ?? null;
   // Every other install location (other AE versions, custom folders).
@@ -167,6 +176,13 @@ function DetailBody({
           <div className="banner-actions">
             <button className="banner-edit" onClick={() => onSetBanner(pkg.id)}>
               <i className="bi bi-image" /> {t("detail.changeBanner")}
+            </button>
+            <button
+              className="banner-edit banner-info-btn"
+              title={t("detail.bannerFromClipboard")}
+              onClick={() => onSetBannerClipboard(pkg.id)}
+            >
+              <i className="bi bi-clipboard" />
             </button>
             {pkg.banner && (
               <button
@@ -200,7 +216,7 @@ function DetailBody({
           ) : (
             <>
               <h2 className="detail-title">{m.name}</h2>
-              <button className="icon-btn" title={t("common.edit")} onClick={() => setEditing(true)}>
+            <button className="icon-btn" title={t("common.edit")} onClick={() => { cancel(); setEditing(true); }}>
                 <i className="bi bi-pencil" />
               </button>
             </>
@@ -352,17 +368,17 @@ function DetailBody({
           ) : (
             <>
               <label className="field">
-                <select value={aeSel} onChange={(e) => setAeSel(e.target.value)}>
+                <select value={activeTarget} onChange={(e) => setAeSel(e.target.value)}>
                   {aeInstalls.length > 1 && (
                     <option value="all">{t("install.allAe", { count: aeInstalls.length })}</option>
                   )}
-                  {aeInstalls.map((ae, i) => (
-                    <option key={ae.root} value={String(i)}>
+                  {aeInstalls.map((ae) => (
+                    <option key={ae.root} value={`ae:${ae.root}`}>
                       {ae.name}
                     </option>
                   ))}
-                  {customDirs.map((dir, i) => (
-                    <option key={dir} value={`custom:${i}`}>
+                  {customDirs.map((dir) => (
+                    <option key={dir} value={`custom:${dir}`}>
                       {t("install.customFolder")}: {baseName(dir)}
                     </option>
                   ))}
@@ -399,7 +415,7 @@ function DetailBody({
                       className="btn"
                       disabled={busy}
                       onClick={() =>
-                        onInstall(pkg, { installation: selectedAe!, label: selectedRecord.label })
+                        onInstall(pkg, { installation: selectedRecord.ae, custom_dir: selectedRecord.ae ? null : selectedRecord.target_dir, label: selectedRecord.label })
                       }
                     >
                       <i className="bi bi-arrow-clockwise" /> {t("install.updateBtn")}
@@ -414,7 +430,7 @@ function DetailBody({
                   </div>
                 </div>
               ) : (
-                <button className="btn install-btn" onClick={doInstall} disabled={busy}>
+                <button className="btn install-btn" onClick={doInstall} disabled={busy || !activeTarget}>
                   <i className="bi bi-download" /> {t("install.button")}
                 </button>
               )}
@@ -423,6 +439,15 @@ function DetailBody({
         </section>
         )}
 
+        {!editing && (
+          <section className="detail-section">
+            <h3>{t("maintenance.tools")}</h3>
+            <div className="maintenance-actions">
+              <button className="btn" disabled={busy || !pkg.installs.length} onClick={() => onCheckIntegrity(pkg.id)}><i className="bi bi-shield-check" /> {t("maintenance.check")}</button>
+              <button className="btn" disabled={busy} onClick={() => onShowRevisions(pkg)}><i className="bi bi-arrow-counterclockwise" /> {t("maintenance.revisionsTitle")}</button>
+            </div>
+          </section>
+        )}
         {/* -------- Other install locations (view mode only) -------- */}
         {!editing && otherRecords.length > 0 && (
           <section className="detail-section">

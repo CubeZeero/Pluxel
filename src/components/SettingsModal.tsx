@@ -1,26 +1,23 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
-import { api } from "../lib/api";
+import { api, type HelperStatus } from "../lib/api";
 import { Modal } from "./Modal";
+import { ColorPicker } from "./ColorPicker";
 import {
-  ACCENT_PRESETS,
-  useAccent,
+  KIND_COLOR_PRESETS,
   useCustomInstallDirs,
   useEffectsFolder,
   useKindColors,
   useTheme,
-  type Theme,
 } from "../lib/theme";
 import { LANGS, useI18n } from "../lib/i18n";
 import { KIND_I18N, KIND_ORDER, type AeInstallation } from "../types";
 
-const THEMES: { value: Theme; key: string; icon: string }[] = [
-  { value: "light", key: "settings.themeLight", icon: "bi-sun" },
-  { value: "dark", key: "settings.themeDark", icon: "bi-moon-stars" },
-];
 
 interface Props {
+  onCheckIntegrity: () => void;
+  onShowHistory: () => void;
   busy: boolean;
   packageCount: number;
   aeInstalls: AeInstallation[];
@@ -34,6 +31,8 @@ interface Props {
 }
 
 export function SettingsModal({
+  onCheckIntegrity,
+  onShowHistory,
   busy,
   packageCount,
   aeInstalls,
@@ -47,7 +46,6 @@ export function SettingsModal({
 }: Props) {
   const [dataDir, setDataDir] = useState("");
   const [theme, setTheme] = useTheme();
-  const [accent, setAccent] = useAccent();
   const { colors: kindColors, setColor: setKindColor, reset: resetKindColors } = useKindColors();
   const [effectsFolder, setEffectsFolder] = useEffectsFolder();
   const [customDirs, setCustomDirs] = useCustomInstallDirs();
@@ -66,16 +64,49 @@ export function SettingsModal({
   const [adminSupported, setAdminSupported] = useState(false);
   const [adminUnlocked, setAdminUnlocked] = useState(false);
 
-  const refreshAdmin = () => {
-    api.adminStatus().then((s) => {
-      setAdminSupported(s.supported);
-      setAdminUnlocked(s.unlocked);
-    });
+  const [helper, setHelper] = useState<HelperStatus | null>(null);
+  const [helperBusy, setHelperBusy] = useState(false);
+  const [adminError, setAdminError] = useState("");
+
+  const refreshAdmin = async () => {
+    const [adminResult, helperResult] = await Promise.allSettled([
+      api.adminStatus(), api.helperStatus(),
+    ]);
+    if (adminResult.status === "fulfilled") {
+      setAdminSupported(adminResult.value.supported);
+      setAdminUnlocked(adminResult.value.unlocked);
+    }
+    if (helperResult.status === "fulfilled") setHelper(helperResult.value);
+    const errors = [adminResult, helperResult]
+      .filter((result) => result.status === "rejected")
+      .map((result) => String(result.reason));
+    if (errors.length) throw new Error(errors.join("\n"));
+    setAdminError("");
+  };
+
+  const runAdminAction = async (action?: () => Promise<unknown>) => {
+    setHelperBusy(true);
+    setAdminError("");
+    try {
+      try {
+        await action?.();
+      } finally {
+        await refreshAdmin();
+      }
+    } catch (error) {
+      setAdminError(String(error));
+    } finally {
+      setHelperBusy(false);
+    }
   };
 
   useEffect(() => {
     api.getDataDir().then(setDataDir).catch(() => void 0);
-    refreshAdmin();
+    const refresh = () => { void refreshAdmin().catch((error) => setAdminError(String(error))); };
+    refresh();
+    // Registration may need approval outside the app in System Settings.
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
   }, []);
 
   return (
@@ -96,39 +127,16 @@ export function SettingsModal({
       </section>
 
       <section className="settings-section">
-        <h4>{t("settings.theme")}</h4>
+        <h4>{t("settings.appearance")}</h4>
         <div className="seg-toggle">
-          {THEMES.map((o) => (
-            <button
-              key={o.value}
-              className={`seg-btn${theme === o.value ? " active" : ""}`}
-              onClick={() => setTheme(o.value)}
-            >
-              <i className={`bi ${o.icon}`} /> {t(o.key)}
+          {(["light", "dark"] as const).map((option) => (
+            <button key={option} className={`seg-btn${theme === option ? " active" : ""}`}
+              aria-pressed={theme === option} onClick={() => setTheme(option)}>
+              <i className={`bi bi-${option === "light" ? "sun" : "moon"}`} /> {t(`settings.${option}`)}
             </button>
           ))}
         </div>
       </section>
-
-      <section className="settings-section">
-        <h4>{t("settings.accent")}</h4>
-        <div className="accent-picker">
-          {ACCENT_PRESETS.map((c) => (
-            <button
-              key={c}
-              className={`accent-swatch${accent.toLowerCase() === c.toLowerCase() ? " active" : ""}`}
-              style={{ background: c }}
-              onClick={() => setAccent(c)}
-              aria-label={c}
-            />
-          ))}
-          <label className="accent-custom">
-            <i className="bi bi-eyedropper" />
-            <input type="color" value={accent} onChange={(e) => setAccent(e.target.value)} />
-          </label>
-        </div>
-      </section>
-
       <section className="settings-section">
         <div className="settings-head">
           <h4>{t("settings.kindColors")}</h4>
@@ -138,16 +146,7 @@ export function SettingsModal({
         </div>
         <div className="kind-colors">
           {KIND_ORDER.map((kind) => (
-            <label key={kind} className="kind-color-row">
-              <span className="kind-swatch" style={{ background: kindColors[kind] }}>
-                <input
-                  type="color"
-                  value={kindColors[kind]}
-                  onChange={(e) => setKindColor(kind, e.target.value)}
-                />
-              </span>
-              <span className="kind-color-name">{t(KIND_I18N[kind])}</span>
-            </label>
+            <ColorPicker key={kind} label={t(KIND_I18N[kind])} value={kindColors[kind]} onChange={(c) => setKindColor(kind, c)} presets={KIND_COLOR_PRESETS} />
           ))}
         </div>
       </section>
@@ -193,14 +192,59 @@ export function SettingsModal({
         <p className="settings-hint">{t("settings.customInstallHint")}</p>
       </section>
 
-      {adminSupported && (
+      {(adminSupported || helper?.supported) && (
         <section className="settings-section">
           <h4>{t("settings.adminAuth")}</h4>
-          <p className="settings-hint">{t("settings.adminAuthHint")}</p>
-          {adminUnlocked && (
-            <button className="btn" onClick={() => api.adminLock().then(refreshAdmin)}>
-              <i className="bi bi-lock" /> {t("settings.adminLock")}
+          <p className="settings-hint">{t("settings.helperHint")}</p>
+          <p className="settings-hint">{t("settings.helperRequirements")}</p>
+          <p className="settings-hint">{t("settings.helperScope")}</p>
+          <p role="status" aria-live="polite">
+            {t("settings.helperStatus")}: {helper
+              ? helper.enabled
+                ? t("settings.helperEnabled")
+                : !helper.available
+                  ? t("settings.helperUnavailable")
+                  : t(`settings.helperState.${["notRegistered", "requiresApproval", "notFound"].includes(helper.status) ? helper.status : "unknown"}`)
+              : t("settings.helperUnknown")}
+          </p>
+          <p className="settings-hint">{t("settings.helperApproval")}</p>
+          <div className="maintenance-actions">
+            <button className="btn" disabled={busy || helperBusy || !helper?.available || helper.enabled}
+              onClick={() => void runAdminAction(api.helperRegister)}>
+              {t("settings.helperSetup")}
             </button>
+            <button className="btn" disabled={busy || helperBusy || !helper?.available}
+              onClick={() => void runAdminAction(api.helperUnregister)}>
+              {t("settings.helperRemove")}
+            </button>
+            <button className="btn" disabled={helperBusy} onClick={() => void runAdminAction()}>
+              <i className="bi bi-arrow-repeat" /> {t("settings.helperRefresh")}
+            </button>
+          </div>
+          {helper?.enabled && (
+            <>
+              <p role="status" aria-live="polite">
+                {t(helper.unlocked ? "settings.helperSessionUnlocked" : "settings.helperSessionLocked")}
+              </p>
+              {helper.unlocked && (
+                <button className="btn" disabled={busy || helperBusy}
+                  onClick={() => void runAdminAction(api.adminLock)}>
+                  <i className="bi bi-lock" /> {t("settings.adminLock")}
+                </button>
+              )}
+            </>
+          )}
+          {adminError && <p role="alert">{t("settings.helperError", { error: adminError })}</p>}
+          {!helper?.enabled && adminSupported && (
+            <>
+              <p className="settings-hint">{t("settings.adminAuthHint")}</p>
+              {adminUnlocked && (
+                <button className="btn" disabled={busy || helperBusy}
+                  onClick={() => void runAdminAction(api.adminLock)}>
+                  <i className="bi bi-lock" /> {t("settings.adminLock")}
+                </button>
+              )}
+            </>
           )}
         </section>
       )}
@@ -246,6 +290,14 @@ export function SettingsModal({
         <button className="btn" onClick={onExportZip} disabled={busy || packageCount === 0}>
           <i className="bi bi-box-arrow-up" /> {t("settings.exportAll")}
         </button>
+      </section>
+
+      <section className="settings-section">
+        <h4>{t("maintenance.tools")}</h4>
+        <div className="maintenance-actions">
+          <button className="btn" disabled={busy} onClick={onCheckIntegrity}><i className="bi bi-shield-check" /> {t("maintenance.check")}</button>
+          <button className="btn" disabled={busy} onClick={onShowHistory}><i className="bi bi-clock-history" /> {t("maintenance.historyTitle")}</button>
+        </div>
       </section>
 
       <section className="settings-section">

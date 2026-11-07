@@ -3,6 +3,7 @@ import { BundleCard } from "./BundleCard";
 import type { Bundle } from "../types";
 
 interface Props {
+  totalCount?: number;
   bundles: Bundle[];
   selectedId: string | null;
   busy: boolean;
@@ -11,7 +12,7 @@ interface Props {
   onCreate: () => void;
 }
 
-export function BundleList({ bundles, selectedId, busy, viewMode, onSelect, onCreate }: Props) {
+export function BundleList({ bundles, totalCount = bundles.length, selectedId, busy, viewMode, onSelect, onCreate }: Props) {
   const t = useT();
 
   return (
@@ -24,8 +25,7 @@ export function BundleList({ bundles, selectedId, busy, viewMode, onSelect, onCr
       {bundles.length === 0 ? (
         <div className="empty-state bundle-empty">
           <div className="empty-mark">◆</div>
-          <h2>{t("bundle.emptyTitle")}</h2>
-          <p>{t("bundle.emptyBody")}</p>
+          {totalCount > 0 ? <p>{t("empty.noMatch")}</p> : <><h2>{t("bundle.emptyTitle")}</h2><p>{t("bundle.emptyBody")}</p></>}
         </div>
       ) : viewMode === "grid" ? (
         <div className="grid">

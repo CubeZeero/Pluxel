@@ -1,3 +1,4 @@
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
@@ -13,6 +14,7 @@ use crate::library::LibraryStore;
 use crate::models::{
     AeInstallation, Bundle, InstallRecord, Library, Manifest, Package, PackageKind,
 };
+use crate::{activity, maintenance, preview};
 
 /// Resolve the Pluxel data directory and open a [`LibraryStore`] on it.
 fn store(app: &AppHandle) -> AppResult<LibraryStore> {
@@ -27,6 +29,200 @@ fn now() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
+static LIBRARY_OPERATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+fn operation_guard() -> AppResult<std::sync::MutexGuard<'static, ()>> {
+    LIBRARY_OPERATION
+        .lock()
+        .map_err(|_| AppError::msg("ライブラリ処理のロックを取得できません"))
+}
+
+/// Hashing, copying and recovery may take time for large plugins. Keep them
+/// off the window's event loop and serialize the full library transaction.
+async fn library_task<T: Send + 'static>(
+    app: AppHandle,
+    action: impl FnOnce(&LibraryStore) -> AppResult<T> + Send + 'static,
+) -> AppResult<T> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = operation_guard()?;
+        action(&store(&app)?)
+    })
+    .await
+    .map_err(|e| AppError::msg(e.to_string()))?
+}
+
+#[tauri::command]
+pub fn take_operation_warnings() -> Vec<String> {
+    crate::warnings::take()
+}
+
+fn log_action(store: &LibraryStore, action: &str, pkg: Option<&Package>, detail: &str) {
+    if activity::append(store, action, pkg, detail).is_err() {
+        crate::warnings::push("maintenance.warningHistory");
+    }
+}
+
+#[tauri::command]
+pub async fn prepare_import(
+    app: AppHandle,
+    paths: Vec<String>,
+) -> AppResult<preview::PreparedImport> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = operation_guard()?;
+        preview::prepare(&store(&app)?, &paths)
+    })
+    .await
+    .map_err(|e| AppError::msg(e.to_string()))?
+}
+
+#[tauri::command]
+pub async fn commit_import(app: AppHandle, token: String) -> AppResult<Vec<Package>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = operation_guard()?;
+        let store = store(&app)?;
+        commit_prepared(&store, &token)
+    })
+    .await
+    .map_err(|e| AppError::msg(e.to_string()))?
+}
+
+pub(crate) fn commit_prepared(store: &LibraryStore, token: &str) -> AppResult<Vec<Package>> {
+    let packages = preview::commit(store, token)?;
+    for pkg in &packages {
+        log_action(store, "import", Some(pkg), "");
+    }
+    Ok(packages)
+}
+
+#[tauri::command]
+pub async fn discard_import(app: AppHandle, id: String, replacement_id: String) -> AppResult<()> {
+    library_task(app, move |store| {
+        discard_duplicate(store, &id, &replacement_id)
+    })
+    .await
+}
+
+pub(crate) fn discard_duplicate(
+    store: &LibraryStore,
+    id: &str,
+    replacement_id: &str,
+) -> AppResult<()> {
+    if id == replacement_id {
+        return Err(AppError::msg("同じパッケージは指定できません"));
+    }
+    let source = store.get(id)?;
+    let _existing = store.get(replacement_id)?;
+    if !source.installs.is_empty() {
+        return Err(AppError::msg("インストール済みパッケージは破棄できません"));
+    }
+    let mut library = store.load()?;
+    library.packages.retain(|p| p.id != id);
+    for bundle in &mut library.bundles {
+        for member in &mut bundle.package_ids {
+            if *member == id {
+                *member = replacement_id.to_string();
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        bundle.package_ids.retain(|id| seen.insert(id.clone()));
+    }
+    store.save(&library)?;
+    if std::fs::remove_dir_all(store.package_dir(id)).is_err() {
+        crate::warnings::push("maintenance.warningCleanup");
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn cancel_import(app: AppHandle, token: String) -> AppResult<()> {
+    let _guard = operation_guard()?;
+    preview::cancel(&store(&app)?, &token)
+}
+
+#[tauri::command]
+pub async fn check_integrity(
+    app: AppHandle,
+    id: Option<String>,
+) -> AppResult<Vec<maintenance::IntegrityEntry>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = operation_guard()?;
+        maintenance::check(&store(&app)?, id.as_deref())
+    })
+    .await
+    .map_err(|e| AppError::msg(e.to_string()))?
+}
+
+#[tauri::command]
+pub fn get_history(app: AppHandle) -> AppResult<Vec<activity::ActivityEvent>> {
+    activity::history(&store(&app)?)
+}
+
+#[tauri::command]
+pub async fn get_revisions(app: AppHandle, id: String) -> AppResult<Vec<activity::Revision>> {
+    library_task(app, move |store| activity::revisions(store, &id)).await
+}
+
+#[tauri::command]
+pub async fn restore_revision(
+    app: AppHandle,
+    id: String,
+    revision_id: String,
+) -> AppResult<Package> {
+    library_task(app, move |store| {
+        let pkg = activity::restore(store, &id, &revision_id)?;
+        log_action(store, "restore", Some(&pkg), &revision_id);
+        Ok(pkg)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn reinstall_package(
+    app: AppHandle,
+    id: String,
+    params: InstallParams,
+) -> AppResult<Package> {
+    library_task(app, move |store| {
+        let pkg = store.get(&id)?;
+        if !pkg.kind.bundleable() {
+            return Err(AppError::msg(
+                "この形式の再インストールには対応していません",
+            ));
+        }
+        let mut requests = Vec::new();
+        for rec in &pkg.installs {
+            if rec.paths.is_empty() {
+                continue;
+            }
+            let effect_subdir = if rec.kind == PackageKind::Plugin {
+                rec.ae
+                    .as_ref()
+                    .and_then(|ae| {
+                        Path::new(&rec.target_dir)
+                            .strip_prefix(&ae.plugins_dir)
+                            .ok()
+                    })
+                    .filter(|rel| !rel.as_os_str().is_empty())
+                    .map(|rel| rel.to_string_lossy().to_string())
+            } else {
+                None
+            };
+            let one = resolve_install_params(InstallParams {
+                installation: rec.ae.clone(),
+                kind: Some(rec.kind),
+                custom_dir: rec.ae.is_none().then(|| rec.target_dir.clone()),
+                label: Some(rec.label.clone()),
+                elevated: params.elevated,
+                effect_subdir,
+                allow_overwrite: params.allow_overwrite,
+            })?;
+            requests.push((id.clone(), one));
+        }
+        crate::deployment::apply(store, &requests)?;
+        store.get(&id)
+    })
+    .await
+}
+
 /// Copy `src` into `dir` as `banner.<ext>`, returning the stored filename.
 fn write_banner_file(dir: &Path, src: &Path) -> AppResult<String> {
     let ext = src
@@ -34,6 +230,12 @@ fn write_banner_file(dir: &Path, src: &Path) -> AppResult<String> {
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_else(|| "png".into());
     let banner_name = format!("banner.{ext}");
+    if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp") {
+        return Err(AppError::msg("対応していないバナー画像形式です"));
+    }
+    if std::fs::metadata(src)?.len() > MAX_BANNER_BYTES {
+        return Err(AppError::msg("バナー画像は32 MiB以下にしてください"));
+    }
     std::fs::create_dir_all(dir)?;
     std::fs::copy(src, dir.join(&banner_name))?;
     Ok(banner_name)
@@ -41,6 +243,9 @@ fn write_banner_file(dir: &Path, src: &Path) -> AppResult<String> {
 
 /// Best-effort delete of a stored banner file.
 fn remove_banner_file(dir: &Path, name: &str) {
+    if !crate::library::is_safe_segment(name) {
+        return;
+    }
     let path = dir.join(name);
     if path.exists() {
         let _ = std::fs::remove_file(path);
@@ -59,7 +264,13 @@ fn banner_data_url(dir: &Path, name: &str) -> AppResult<Option<String>> {
     if !path.exists() {
         return Ok(None);
     }
-    let bytes = std::fs::read(&path)?;
+    let mut bytes = Vec::new();
+    std::fs::File::open(&path)?
+        .take(MAX_BANNER_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_BANNER_BYTES {
+        return Err(AppError::msg("バナー画像は32 MiB以下にしてください"));
+    }
     let mime = match path.extension().and_then(|e| e.to_str()) {
         Some("jpg") | Some("jpeg") => "image/jpeg",
         Some("webp") => "image/webp",
@@ -71,6 +282,7 @@ fn banner_data_url(dir: &Path, name: &str) -> AppResult<Option<String>> {
 
 #[tauri::command]
 pub fn get_library(app: AppHandle) -> AppResult<Library> {
+    let _guard = operation_guard()?;
     store(&app)?.load()
 }
 
@@ -82,6 +294,7 @@ pub fn get_data_dir(app: AppHandle) -> AppResult<String> {
 
 #[tauri::command]
 pub fn import_paths(app: AppHandle, paths: Vec<String>) -> AppResult<Vec<Package>> {
+    let _guard = operation_guard()?;
     let store = store(&app)?;
     let mut imported = Vec::new();
     for p in paths {
@@ -92,31 +305,80 @@ pub fn import_paths(app: AppHandle, paths: Vec<String>) -> AppResult<Vec<Package
 
 /// Attach companion files/folders (e.g. `.ffx`, image assets) to a package.
 #[tauri::command]
-pub fn add_files(app: AppHandle, id: String, paths: Vec<String>) -> AppResult<Package> {
-    let store = store(&app)?;
-    let mut pkg = store.get(&id)?;
-    for p in &paths {
-        importer::add_source(&store, &id, Path::new(p))?;
+pub async fn add_files(app: AppHandle, id: String, paths: Vec<String>) -> AppResult<Package> {
+    library_task(app, move |store| add_companions(store, &id, &paths)).await
+}
+
+pub(crate) fn add_companions(
+    store: &LibraryStore,
+    id: &str,
+    paths: &[String],
+) -> AppResult<Package> {
+    let mut pkg = store.get(id)?;
+    let mut names = std::collections::HashSet::new();
+    for path in paths {
+        let path = Path::new(path);
+        crate::deployment::validate_tree(path)?;
+        let canonical = path.canonicalize()?;
+        if store.root().canonicalize()?.starts_with(&canonical) {
+            return Err(AppError::msg("保管庫自身を同梱することはできません"));
+        }
+        let name = path
+            .file_name()
+            .ok_or_else(|| AppError::msg("ファイル名が不正です"))?;
+        if store.files_dir(id).join(name).symlink_metadata().is_ok()
+            || !names.insert(name.to_string_lossy().to_lowercase())
+        {
+            return Err(AppError::msg("同名のファイル・フォルダがあります。既存の同梱ファイルを削除するか、本体の差し替えを使用してください。"));
+        }
     }
-    importer::rescan(&store, &mut pkg)?;
-    store.upsert(pkg.clone())?;
+    if paths.is_empty() {
+        return Ok(pkg);
+    }
+    let revision = activity::snapshot(store, &pkg, "add_files")?;
+    let result = (|| -> AppResult<()> {
+        for path in paths {
+            importer::add_source(store, id, Path::new(path))?;
+        }
+        importer::rescan(store, &mut pkg)?;
+        store.upsert(pkg.clone())
+    })();
+    if let Err(error) = result {
+        activity::rollback(store, id, &revision.id)?;
+        return Err(error);
+    }
+    log_action(store, "addFiles", Some(&pkg), &paths.len().to_string());
     Ok(pkg)
 }
 
 /// Replace all of a package's stored files with new sources (a version bump).
 #[tauri::command]
-pub fn replace_files(app: AppHandle, id: String, paths: Vec<String>) -> AppResult<Package> {
-    let store = store(&app)?;
-    let mut pkg = store.get(&id)?;
-    let srcs: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
-    importer::replace_files(&store, &mut pkg, &srcs)?;
-    store.upsert(pkg.clone())?;
-    Ok(pkg)
+pub async fn replace_files(app: AppHandle, id: String, paths: Vec<String>) -> AppResult<Package> {
+    library_task(app, move |store| {
+        let mut pkg = store.get(&id)?;
+        let srcs: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+        let revision = activity::snapshot(store, &pkg, "replace_files")?;
+        let result =
+            importer::replace_files(store, &mut pkg, &srcs).and_then(|_| store.upsert(pkg.clone()));
+        if let Err(e) = result {
+            activity::rollback(store, &id, &revision.id)?;
+            return Err(e);
+        }
+        log_action(store, "update", Some(&pkg), "");
+        Ok(pkg)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn remove_package(app: AppHandle, id: String) -> AppResult<()> {
-    store(&app)?.remove(&id)
+pub async fn remove_package(app: AppHandle, id: String) -> AppResult<()> {
+    library_task(app, move |store| {
+        let pkg = store.get(&id)?;
+        store.remove(&id)?;
+        log_action(store, "delete", Some(&pkg), "");
+        Ok(())
+    })
+    .await
 }
 
 /// Metadata for a replace: adopt the source manifest when it carries its own
@@ -129,7 +391,10 @@ pub(crate) fn merged_replace_manifest(old: Manifest, src: Manifest) -> Manifest 
         && src.description.trim().is_empty()
         && src.homepage.trim().is_empty());
     if src_has_metadata {
-        Manifest { tags: old.tags, ..src }
+        Manifest {
+            tags: old.tags,
+            ..src
+        }
     } else {
         // Refresh the display name from the new file, keep everything else.
         let name = if src.name.trim().is_empty() {
@@ -149,79 +414,153 @@ pub(crate) fn merged_replace_manifest(old: Manifest, src: Manifest) -> Manifest 
 /// existing version/author/description/etc. are preserved. The banner is
 /// updated only if the source has one.
 #[tauri::command]
-pub fn replace_package(app: AppHandle, target_id: String, source_id: String) -> AppResult<Package> {
-    let store = store(&app)?;
+pub async fn replace_package(
+    app: AppHandle,
+    target_id: String,
+    source_id: String,
+) -> AppResult<Package> {
+    library_task(app, move |store| {
+        replace_existing(store, &target_id, &source_id)
+    })
+    .await
+}
+
+pub(crate) fn replace_existing(
+    store: &LibraryStore,
+    target_id: &str,
+    source_id: &str,
+) -> AppResult<Package> {
     let mut target = store.get(&target_id)?;
     let source = store.get(&source_id)?;
-
-    // Physically replace the target's files with the source's.
-    let tfiles = store.files_dir(&target_id);
-    if tfiles.exists() {
-        std::fs::remove_dir_all(&tfiles)?;
+    if !source.installs.is_empty() {
+        return Err(AppError::msg(
+            "インストール記録のあるパッケージは差し替え元に使用できません",
+        ));
     }
-    importer::copy_recursively(&store.files_dir(&source_id), &tfiles)?;
+    if target_id == source_id {
+        return Err(AppError::msg("同じパッケージで置き換えることはできません"));
+    }
+    let revision = activity::snapshot(store, &target, "replace_package")?;
+    let result = (|| -> AppResult<Package> {
+        // Physically replace the target's files with the source's.
+        let tfiles = store.files_dir(&target_id);
+        if tfiles.exists() {
+            std::fs::remove_dir_all(&tfiles)?;
+        }
+        importer::copy_recursively(&store.files_dir(&source_id), &tfiles)?;
 
-    target.manifest = merged_replace_manifest(target.manifest.clone(), source.manifest.clone());
-    target.kind = source.kind;
-    target.files = source.files.clone();
+        target.manifest = merged_replace_manifest(target.manifest.clone(), source.manifest.clone());
+        target.kind = source.kind;
+        target.files = source.files.clone();
 
-    // Copy the source's banner over, if any.
-    if let Some(b) = &source.banner {
-        let sp = store.package_dir(&source_id).join(b);
-        if sp.exists() {
-            std::fs::copy(&sp, store.package_dir(&target_id).join(b))?;
-            target.banner = Some(b.clone());
+        // Copy the source's banner over, if any.
+        if let Some(b) = &source.banner {
+            if !crate::library::is_safe_segment(b) {
+                return Err(AppError::msg("バナーのファイル名が不正です"));
+            }
+            let sp = store.package_dir(&source_id).join(b);
+            if sp.exists() {
+                std::fs::copy(&sp, store.package_dir(&target_id).join(b))?;
+                target.banner = Some(b.clone());
+            }
+        }
+        target.updated_at = now();
+
+        store.write_manifest(&target_id, &target.manifest)?;
+        let mut library = store.load()?;
+        let entry = library
+            .packages
+            .iter_mut()
+            .find(|p| p.id == target_id)
+            .ok_or_else(|| AppError::msg("パッケージが見つかりません"))?;
+        *entry = target.clone();
+        library.packages.retain(|p| p.id != source_id);
+        for bundle in &mut library.bundles {
+            for id in &mut bundle.package_ids {
+                if *id == source_id {
+                    *id = target_id.to_string();
+                }
+            }
+            let mut seen = std::collections::HashSet::new();
+            bundle.package_ids.retain(|id| seen.insert(id.clone()));
+        }
+        store.save(&library)?;
+        Ok(target)
+    })();
+    match result {
+        Ok(pkg) => {
+            if std::fs::remove_dir_all(store.package_dir(&source_id)).is_err() {
+                crate::warnings::push("maintenance.warningCleanup");
+            }
+            log_action(store, "update", Some(&pkg), "");
+            Ok(pkg)
+        }
+        Err(e) => {
+            activity::rollback(store, &target_id, &revision.id)?;
+            Err(e)
         }
     }
-    target.updated_at = now();
-
-    store.write_manifest(&target_id, &target.manifest)?;
-    store.upsert(target.clone())?;
-    store.remove(&source_id)?; // discard the freshly-imported copy
-    Ok(target)
 }
 
 /// Remove a single stored file (or a top-level folder/bundle) from a package.
 /// `rel_path` is relative to the package `files/` directory.
 #[tauri::command]
-pub fn remove_file(app: AppHandle, id: String, rel_path: String) -> AppResult<Package> {
-    // Reject anything that isn't a purely-relative path: an absolute path,
-    // Windows drive/UNC prefix, or a `..` component would let `join` escape the
-    // package's files/ directory and delete arbitrary files.
-    let rel = Path::new(&rel_path);
-    let path_ok = !rel_path.trim().is_empty()
-        && rel.components().all(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir));
-    if !path_ok {
+pub async fn remove_file(app: AppHandle, id: String, rel_path: String) -> AppResult<Package> {
+    library_task(app, move |store| remove_companion(store, &id, &rel_path)).await
+}
+
+pub(crate) fn remove_companion(
+    store: &LibraryStore,
+    id: &str,
+    rel_path: &str,
+) -> AppResult<Package> {
+    if rel_path.is_empty()
+        || rel_path.contains('\\')
+        || rel_path
+            .split('/')
+            .any(|part| !crate::library::is_safe_segment(part))
+    {
         return Err(AppError::msg("不正なパスです"));
     }
-    let store = store(&app)?;
-    let mut pkg = store.get(&id)?;
-    let files_dir = store.files_dir(&id);
-    let target = files_dir.join(&rel_path);
-    // Belt-and-suspenders: resolve symlinks and confirm the target stays inside
-    // files_dir before deleting anything.
-    if let Ok(canon) = target.canonicalize() {
-        let base = files_dir.canonicalize().unwrap_or(files_dir.clone());
-        if !canon.starts_with(&base) {
-            return Err(AppError::msg("不正なパスです"));
+    let mut pkg = store.get(id)?;
+    if crate::assets::protects(&pkg, rel_path) {
+        return Err(AppError::msg(
+            "本体、または本体を含むフォルダは削除できません",
+        ));
+    }
+    let files = store.files_dir(id).canonicalize()?;
+    let target = files.join(rel_path);
+    let resolved = target.canonicalize()?;
+    if resolved == files || !resolved.starts_with(&files) {
+        return Err(AppError::msg("不正なパスです"));
+    }
+    crate::deployment::validate_target(&target)?;
+    let revision = activity::snapshot(store, &pkg, "remove_file")?;
+    let result = (|| -> AppResult<()> {
+        if target.is_dir() {
+            std::fs::remove_dir_all(&target)?;
+        } else {
+            std::fs::remove_file(&target)?;
         }
+        importer::rescan(store, &mut pkg)?;
+        store.upsert(pkg.clone())
+    })();
+    if let Err(error) = result {
+        activity::rollback(store, id, &revision.id)?;
+        return Err(error);
     }
-    if target.is_dir() {
-        std::fs::remove_dir_all(&target)?;
-    } else if target.exists() {
-        std::fs::remove_file(&target)?;
-    } else {
-        return Err(AppError::msg("ファイルが見つかりません"));
-    }
-    importer::rescan(&store, &mut pkg)?;
-    store.upsert(pkg.clone())?;
+    log_action(store, "removeFile", Some(&pkg), rel_path);
     Ok(pkg)
 }
 
 #[tauri::command]
 pub fn update_manifest(app: AppHandle, id: String, manifest: Manifest) -> AppResult<Package> {
+    let _guard = operation_guard()?;
     let store = store(&app)?;
     let mut pkg = store.get(&id)?;
+    if pkg.manifest.version != manifest.version {
+        activity::snapshot(&store, &pkg, "metadata_version")?;
+    }
     if let Some(kind) = manifest.install_as {
         pkg.kind = kind;
     }
@@ -229,12 +568,14 @@ pub fn update_manifest(app: AppHandle, id: String, manifest: Manifest) -> AppRes
     pkg.updated_at = now();
     store.write_manifest(&id, &manifest)?;
     store.upsert(pkg.clone())?;
+    log_action(&store, "update", Some(&pkg), "metadata");
     Ok(pkg)
 }
 
 /// Replace a package banner with the image at `source_path`.
 #[tauri::command]
 pub fn set_banner(app: AppHandle, id: String, source_path: String) -> AppResult<Package> {
+    let _guard = operation_guard()?;
     let store = store(&app)?;
     let mut pkg = store.get(&id)?;
     let banner_name = write_banner_file(&store.package_dir(&id), &PathBuf::from(&source_path))?;
@@ -244,9 +585,86 @@ pub fn set_banner(app: AppHandle, id: String, source_path: String) -> AppResult<
     Ok(pkg)
 }
 
+/// Replace a package banner with the image currently on the clipboard.
+#[tauri::command]
+pub fn set_banner_clipboard(app: AppHandle, id: String) -> AppResult<Package> {
+    let _guard = operation_guard()?;
+    let store = store(&app)?;
+    let mut pkg = store.get(&id)?;
+    let banner_name = write_banner_from_clipboard(&store.package_dir(&id))?;
+    pkg.banner = Some(banner_name);
+    pkg.updated_at = now();
+    store.upsert(pkg.clone())?;
+    Ok(pkg)
+}
+
+/// Read the clipboard image and write it to `dir` as `banner.png`. Errors with a
+/// user-facing message when the clipboard holds no image.
+fn write_banner_from_clipboard(dir: &Path) -> AppResult<String> {
+    let mut clipboard = arboard::Clipboard::new()
+        .map_err(|e| AppError::msg(format!("クリップボードを開けません: {e}")))?;
+    let img = clipboard
+        .get_image()
+        .map_err(|_| AppError::msg("クリップボードに画像がありません"))?;
+    write_clipboard_image(dir, img.width, img.height, &img.bytes)?;
+    Ok("banner.png".to_string())
+}
+
+const MAX_BANNER_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Reject oversized/invalid RGBA data before encoding. Commit only a complete,
+/// flushed image, so errors leave the previous banner intact.
+pub(crate) fn write_clipboard_image(
+    dir: &Path,
+    width: usize,
+    height: usize,
+    bytes: &[u8],
+) -> AppResult<()> {
+    let pixels = width.checked_mul(height).filter(|n| *n <= 8 * 1024 * 1024);
+    if width == 0
+        || height == 0
+        || width > 8192
+        || height > 8192
+        || pixels.and_then(|n| n.checked_mul(4)) != Some(bytes.len())
+    {
+        return Err(AppError::msg(
+            "バナー画像のサイズが不正、または大きすぎます（最大8192px・8メガピクセル）",
+        ));
+    }
+    std::fs::create_dir_all(dir)?;
+    let temp = dir.join(format!(".banner-{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| -> AppResult<()> {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        let mut output = std::io::BufWriter::new(file);
+        let mut encoder = png::Encoder::new(&mut output, width as u32, height as u32);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder
+            .write_header()
+            .map_err(|e| AppError::msg(e.to_string()))?;
+        writer
+            .write_image_data(bytes)
+            .map_err(|e| AppError::msg(e.to_string()))?;
+        writer.finish().map_err(|e| AppError::msg(e.to_string()))?;
+        output.flush()?;
+        drop(output);
+        if std::fs::metadata(&temp)?.len() > MAX_BANNER_BYTES {
+            return Err(AppError::msg("バナー画像は32 MiB以下にしてください"));
+        }
+        std::fs::rename(&temp, dir.join("banner.png"))?;
+        Ok(())
+    })();
+    let _ = std::fs::remove_file(&temp);
+    result
+}
+
 /// Remove a package's banner image (delete the file and clear the reference).
 #[tauri::command]
 pub fn clear_banner(app: AppHandle, id: String) -> AppResult<Package> {
+    let _guard = operation_guard()?;
     let store = store(&app)?;
     let mut pkg = store.get(&id)?;
     if let Some(banner) = pkg.banner.take() {
@@ -277,6 +695,7 @@ pub fn detect_ae() -> AppResult<Vec<AeInstallation>> {
 /// rather than copying it into an After Effects folder.
 #[tauri::command]
 pub fn run_installer(app: AppHandle, id: String) -> AppResult<Package> {
+    let _guard = operation_guard()?;
     let store = store(&app)?;
     let mut pkg = store.get(&id)?; // constrain `id` to a real stored package (UUID)
     let files_dir = store.files_dir(&id);
@@ -292,7 +711,21 @@ pub fn run_installer(app: AppHandle, id: String) -> AppResult<Package> {
             .path()
             .extension()
             .and_then(|e| e.to_str())
-            .map(|e| PackageKind::from_extension(e) == PackageKind::Installer)
+            .map(|e| {
+                let ext = e.to_ascii_lowercase();
+                #[cfg(target_os = "macos")]
+                {
+                    ext == "pkg"
+                }
+                #[cfg(target_os = "windows")]
+                {
+                    matches!(ext.as_str(), "exe" | "msi")
+                }
+                #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+                {
+                    PackageKind::from_extension(&ext) == PackageKind::Installer
+                }
+            })
             .unwrap_or(false);
         if is_installer {
             let depth = entry.depth();
@@ -304,7 +737,7 @@ pub fn run_installer(app: AppHandle, id: String) -> AppResult<Package> {
 
     let installer = best
         .map(|(_, p)| p)
-        .ok_or_else(|| AppError::msg("インストーラー (.pkg / .exe / .msi) が見つかりません"))?;
+        .ok_or_else(|| AppError::msg("このOSに対応するインストーラーが見つかりません"))?;
 
     launch(&installer)?;
 
@@ -326,6 +759,7 @@ pub fn run_installer(app: AppHandle, id: String) -> AppResult<Package> {
         installed_at: now(),
     });
     store.upsert(pkg.clone())?;
+    log_action(&store, "runInstaller", Some(&pkg), "");
     Ok(pkg)
 }
 
@@ -333,14 +767,34 @@ pub fn run_installer(app: AppHandle, id: String) -> AppResult<Package> {
 fn launch(path: &Path) -> AppResult<()> {
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open").arg(path).spawn()?;
+        let status = std::process::Command::new("open").arg(path).status()?;
+        if !status.success() {
+            return Err(AppError::msg("インストーラーを起動できませんでした"));
+        }
     }
     #[cfg(target_os = "windows")]
     {
-        // Launch via Explorer with the path as a single argument — this invokes
-        // the shell default action without going through `cmd /C start`, whose
+        // Invoke the shell default action without going through `cmd /C start`, whose
         // re-parsing lets a crafted file name inject commands.
-        std::process::Command::new("explorer.exe").arg(path).spawn()?;
+        use std::os::windows::ffi::OsStrExt;
+        let file: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let verb: Vec<u16> = "open\0".encode_utf16().collect();
+        let result = unsafe {
+            windows_sys::Win32::UI::Shell::ShellExecuteW(
+                std::ptr::null_mut(),
+                verb.as_ptr(),
+                file.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+            )
+        };
+        if result as isize <= 32 {
+            return Err(AppError::msg(format!(
+                "インストーラーを起動できませんでした (OS code {})",
+                result as isize
+            )));
+        }
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
@@ -361,7 +815,10 @@ pub fn reveal_path(path: String) -> AppResult<()> {
     #[cfg(target_os = "macos")]
     {
         // `-R` reveals (selects) the item in Finder.
-        std::process::Command::new("open").arg("-R").arg(p).spawn()?;
+        std::process::Command::new("open")
+            .arg("-R")
+            .arg(p)
+            .spawn()?;
     }
     #[cfg(target_os = "windows")]
     {
@@ -415,10 +872,34 @@ pub fn admin_unlock(password: String) -> AppResult<()> {
 #[tauri::command]
 pub fn admin_lock() -> AppResult<()> {
     installer::set_session_password(None);
-    Ok(())
+    crate::helper::lock_session()
 }
 
-#[derive(Debug, Deserialize)]
+#[tauri::command]
+pub async fn helper_status() -> AppResult<crate::helper::HelperStatus> {
+    tauri::async_runtime::spawn_blocking(crate::helper::status)
+        .await
+        .map_err(|e| AppError::msg(e.to_string()))?
+}
+
+#[tauri::command]
+pub async fn helper_register(app: AppHandle) -> AppResult<crate::helper::HelperStatus> {
+    library_task(app, |_| crate::helper::configure(true)).await
+}
+
+#[tauri::command]
+pub async fn helper_unregister(app: AppHandle) -> AppResult<crate::helper::HelperStatus> {
+    library_task(app, |_| crate::helper::configure(false)).await
+}
+
+#[tauri::command]
+pub async fn helper_authenticate() -> AppResult<()> {
+    tauri::async_runtime::spawn_blocking(crate::helper::authenticate)
+        .await
+        .map_err(|e| AppError::msg(e.to_string()))?
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct InstallParams {
     /// A detected AE installation (used with `kind` when `custom_dir` is unset).
     pub installation: Option<AeInstallation>,
@@ -428,52 +909,58 @@ pub struct InstallParams {
     pub custom_dir: Option<String>,
     /// Explicit label (used when reinstalling/updating an existing record).
     pub label: Option<String>,
-    /// Perform the install with elevated privileges (password / Touch ID / UAC).
+    /// Perform the install with elevated privileges (password / UAC).
     pub elevated: Option<bool>,
     /// Subfolder under Plug-ins to nest effect plugins into (e.g. "Effects").
     pub effect_subdir: Option<String>,
+    #[serde(default)]
+    pub allow_overwrite: bool,
 }
 
-/// Reject an elevated custom install into well-known privileged/system
-/// locations, so a tampered `custom_dir` can't drop a root-owned payload (e.g.
-/// a LaunchDaemon or Windows service) via the elevated copy.
-pub(crate) fn reject_privileged_dir(dir: &str) -> AppResult<()> {
-    let norm = dir.replace('\\', "/");
-    let low = norm.trim_end_matches('/').to_ascii_lowercase();
-    #[cfg(target_os = "macos")]
-    let blocked: &[&str] = &[
-        "/system",
-        "/usr",
-        "/bin",
-        "/sbin",
-        "/private",
-        "/library/launchdaemons",
-        "/library/launchagents",
-        "/library/startupitems",
-        "/library/privilegedhelpertools",
-    ];
-    #[cfg(target_os = "windows")]
-    let blocked: &[&str] = &["c:/windows", "c:/program files", "c:/program files (x86)"];
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let blocked: &[&str] = &["/bin", "/sbin", "/usr", "/etc", "/boot"];
-    if blocked
-        .iter()
-        .any(|b| low == *b || low.starts_with(&format!("{b}/")))
-    {
-        return Err(AppError::msg(
-            "このフォルダへの管理者権限インストールは許可されていません。",
-        ));
+/// Compute final paths without writing/extracting anything.
+pub(crate) fn planned_paths(
+    store: &LibraryStore,
+    pkg: &Package,
+    params: &InstallParams,
+) -> AppResult<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    for src in installer::installable_entries(&store.files_dir(&pkg.id))? {
+        let target = if let Some(custom) = params
+            .custom_dir
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
+            PathBuf::from(custom)
+        } else {
+            let ae = params
+                .installation
+                .as_ref()
+                .ok_or_else(|| AppError::msg("インストール先が指定されていません"))?;
+            installer::route(
+                ae,
+                installer::entry_kind(&src),
+                params.kind.unwrap_or(pkg.kind),
+                params.effect_subdir.as_deref(),
+            )
+        };
+        let name = if installer::entry_kind(&src) == PackageKind::Zxp {
+            src.file_stem()
+        } else {
+            src.file_name()
+        };
+        paths.push(target.join(name.ok_or_else(|| AppError::msg("ファイル名が不正です"))?));
     }
-    Ok(())
+    Ok(paths)
 }
+
+pub(crate) use crate::paths::reject_privileged_dir;
 
 /// Validate and canonicalize install params once, before any package is
 /// installed. An AE installation must match a currently-detected one, and we
 /// substitute the DETECTED struct so a tampered `plugins_dir`/`scripts_dir`
 /// can't redirect an elevated write to an arbitrary location. Elevated
 /// custom-dir installs are kept out of privileged locations, and any effect
-/// subfolder must be a single plain name. Callers of `install_one` /
-/// `install_ids_elevated` must pass params that went through this first.
+/// subfolder must be a single plain name. The deployment engine must receive parameters resolved through this first.
 pub(crate) fn resolve_install_params(mut params: InstallParams) -> AppResult<InstallParams> {
     if let Some(ae) = &params.installation {
         let detected = ae::detect_installations()
@@ -485,11 +972,20 @@ pub(crate) fn resolve_install_params(mut params: InstallParams) -> AppResult<Ins
         params.installation = Some(detected);
     }
     if params.elevated.unwrap_or(false) {
-        if let Some(dir) = params.custom_dir.as_deref().filter(|s| !s.trim().is_empty()) {
+        if let Some(dir) = params
+            .custom_dir
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
             reject_privileged_dir(dir)?;
         }
     }
-    if let Some(sub) = params.effect_subdir.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(sub) = params
+        .effect_subdir
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         if !crate::library::is_safe_segment(sub) {
             return Err(AppError::msg("エフェクトのサブフォルダ名が不正です"));
         }
@@ -497,145 +993,57 @@ pub(crate) fn resolve_install_params(mut params: InstallParams) -> AppResult<Ins
     Ok(params)
 }
 
-/// Install one package and record where it landed. `params` must already be
-/// validated by [`resolve_install_params`].
-fn install_one(store: &LibraryStore, id: &str, params: &InstallParams) -> AppResult<Package> {
-    let mut pkg = store.get(id)?;
-    let primary = params.kind.unwrap_or(pkg.kind);
-    let elevated = params.elevated.unwrap_or(false);
-    let effect_subdir = params
-        .effect_subdir
-        .as_deref()
-        .filter(|s| !s.trim().is_empty());
-
-    let (paths, target_str, label, ae) = match params.custom_dir.as_deref() {
-        Some(dir) if !dir.trim().is_empty() => {
-            let dir_path = PathBuf::from(dir);
-            let paths = if elevated {
-                installer::install_to_elevated(store, &pkg, &dir_path)?
-            } else {
-                installer::install_to(store, &pkg, &dir_path)?
-            };
-            (paths, dir.to_string(), format!("カスタム: {dir}"), None)
-        }
-        _ => {
-            let ae = params
-                .installation
-                .clone()
-                .ok_or_else(|| AppError::msg("インストール先が指定されていません"))?;
-            let paths = if elevated {
-                installer::install_to_ae_elevated(store, &pkg, &ae, primary, effect_subdir)?
-            } else {
-                installer::install_to_ae(store, &pkg, &ae, primary, effect_subdir)?
-            };
-            let target = installer::route(&ae, primary, primary, effect_subdir)
-                .to_string_lossy()
-                .to_string();
-            let label = ae.name.clone();
-            (paths, target, label, Some(ae))
-        }
-    };
-
-    // Same destination → update in place (drop the old record, add the new one).
-    pkg.installs.retain(|r| r.target_dir != target_str);
-    pkg.installs.push(InstallRecord {
-        id: uuid::Uuid::new_v4().to_string(),
-        label: params.label.clone().filter(|l| !l.trim().is_empty()).unwrap_or(label),
-        kind: primary,
-        target_dir: target_str,
-        ae,
-        paths,
-        installed_at: now(),
-    });
-    store.upsert(pkg.clone())?;
-    Ok(pkg)
-}
-
-/// Install a package, recording where it landed so it can be updated/uninstalled.
-/// Re-installing to the same target directory replaces the previous record.
+/// Install requests are preflighted and committed by one recoverable engine.
 #[tauri::command]
-pub fn install_package(app: AppHandle, id: String, params: InstallParams) -> AppResult<Package> {
-    let store = store(&app)?;
-    let params = resolve_install_params(params)?;
-    install_one(&store, &id, &params)
+pub async fn install_package(
+    app: AppHandle,
+    id: String,
+    params: InstallParams,
+) -> AppResult<Package> {
+    library_task(app, move |store| {
+        let params = resolve_install_params(params)?;
+        crate::deployment::apply(store, &[(id.clone(), params)])?;
+        store.get(&id)
+    })
+    .await
 }
 
-/// Install one package into **every detected After Effects installation** at
-/// once. When elevated, all targets are written in a single elevated batch (one
-/// prompt); otherwise each is installed directly.
 #[tauri::command]
-pub fn install_all_ae(app: AppHandle, id: String, params: InstallParams) -> AppResult<Package> {
-    let store = store(&app)?;
-    if let Some(sub) = params.effect_subdir.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        if !crate::library::is_safe_segment(sub) {
-            return Err(AppError::msg("エフェクトのサブフォルダ名が不正です"));
+pub async fn install_all_ae(
+    app: AppHandle,
+    id: String,
+    mut params: InstallParams,
+) -> AppResult<Package> {
+    library_task(app, move |store| {
+        params.installation = None;
+        params.custom_dir = None;
+        let params = resolve_install_params(params)?;
+        let aes = ae::detect_installations();
+        if aes.is_empty() {
+            return Err(AppError::msg("After Effects が見つかりません"));
         }
-    }
-    let aes = ae::detect_installations();
-    if aes.is_empty() {
-        return Err(AppError::msg("After Effects が見つかりません"));
-    }
-    install_to_all(&store, &id, &aes, &params)
+        install_to_all(store, &id, &aes, &params)
+    })
+    .await
 }
 
-/// Core of [`install_all_ae`], taking an explicit AE list so it can be tested
-/// without on-disk detection.
 pub(crate) fn install_to_all(
     store: &LibraryStore,
     id: &str,
     aes: &[AeInstallation],
     params: &InstallParams,
 ) -> AppResult<Package> {
-    let effect_subdir = params.effect_subdir.as_deref().filter(|s| !s.trim().is_empty());
-    let mut pkg = store.get(id)?;
-    let primary = params.kind.unwrap_or(pkg.kind);
-
-    if params.elevated.unwrap_or(false) {
-        // Plan every AE's copies, then perform them all in one elevated write.
-        let files_dir = store.files_dir(id);
-        let mut all_copies: Vec<(PathBuf, PathBuf)> = Vec::new();
-        let mut records: Vec<InstallRecord> = Vec::new();
-        for ae in aes {
-            let (copies, written) = installer::plan_copies(&files_dir, |p| {
-                installer::route(ae, installer::entry_kind(p), primary, effect_subdir)
-            })?;
-            let target = installer::route(ae, primary, primary, effect_subdir)
-                .to_string_lossy()
-                .to_string();
-            all_copies.extend(copies);
-            records.push(InstallRecord {
-                id: uuid::Uuid::new_v4().to_string(),
-                label: ae.name.clone(),
-                kind: primary,
-                target_dir: target,
-                ae: Some(ae.clone()),
-                paths: written,
-                installed_at: now(),
-            });
-        }
-        installer::elevated_copy(&all_copies)?;
-        for record in records {
-            pkg.installs.retain(|r| r.target_dir != record.target_dir);
-            pkg.installs.push(record);
-        }
-        store.upsert(pkg.clone())?;
-        Ok(pkg)
-    } else {
-        // Non-elevated: install to each AE directly (a write to a protected
-        // folder surfaces the same permission error, driving the elevation retry).
-        for ae in aes {
-            let one = InstallParams {
-                installation: Some(ae.clone()),
-                kind: params.kind,
-                custom_dir: None,
-                label: None,
-                elevated: Some(false),
-                effect_subdir: params.effect_subdir.clone(),
-            };
-            pkg = install_one(store, id, &one)?;
-        }
-        Ok(pkg)
-    }
+    let requests: Vec<_> = aes
+        .iter()
+        .map(|ae| {
+            let mut one = params.clone();
+            one.installation = Some(ae.clone());
+            one.custom_dir = None;
+            (id.to_string(), one)
+        })
+        .collect();
+    crate::deployment::apply(store, &requests)?;
+    store.get(id)
 }
 
 /// Remove an installed copy: delete the written files and drop its record.
@@ -643,72 +1051,98 @@ pub(crate) fn install_to_all(
 /// frontend to retry with `elevated`. The record is only dropped once every
 /// path is actually gone.
 #[tauri::command]
-pub fn uninstall_package(
+pub async fn uninstall_package(
     app: AppHandle,
     id: String,
     record_id: String,
     elevated: Option<bool>,
 ) -> AppResult<Package> {
-    let store = store(&app)?;
-    let mut pkg = store.get(&id)?;
-    let record = pkg
-        .installs
-        .iter()
-        .find(|r| r.id == record_id)
-        .cloned()
-        .ok_or_else(|| AppError::msg("インストール記録が見つかりません"))?;
+    library_task(app, move |store| {
+        let mut pkg = store.get(&id)?;
+        let mut record = pkg
+            .installs
+            .iter()
+            .find(|r| r.id == record_id)
+            .cloned()
+            .ok_or_else(|| AppError::msg("インストール記録が見つかりません"))?;
 
-    if elevated.unwrap_or(false) {
-        let paths: Vec<PathBuf> = record.paths.iter().map(PathBuf::from).collect();
-        installer::elevated_remove(&paths)?;
-    } else {
-        let mut perm_denied: Option<String> = None;
-        for p in &record.paths {
-            let path = Path::new(p);
-            let res = if path.is_dir() {
-                std::fs::remove_dir_all(path)
-            } else if path.exists() {
-                std::fs::remove_file(path)
-            } else {
-                Ok(()) // already gone
-            };
-            if let Err(e) = res {
-                if e.kind() == std::io::ErrorKind::PermissionDenied {
-                    perm_denied = Some(path.display().to_string());
+        maintenance::ensure_uninstall_owned(store, &pkg, &record)?;
+        // CEP directories can be shared by this package's installs in several AE
+        // versions. Removing one record must not remove the others' shared files.
+        record.paths.retain(|path| {
+            !pkg.installs
+                .iter()
+                .filter(|r| r.id != record_id)
+                .any(|r| r.paths.contains(path))
+        });
+
+        for path in &record.paths {
+            crate::deployment::validate_target(Path::new(path))?;
+        }
+
+        if elevated.unwrap_or(false) {
+            let paths: Vec<PathBuf> = record.paths.iter().map(PathBuf::from).collect();
+            installer::elevated_remove(&paths)?;
+        } else {
+            let mut perm_denied: Option<String> = None;
+            for p in &record.paths {
+                let path = Path::new(p);
+                let res = if path.is_dir() {
+                    std::fs::remove_dir_all(path)
+                } else if path.exists() {
+                    std::fs::remove_file(path)
                 } else {
-                    return Err(AppError::from(e));
+                    Ok(()) // already gone
+                };
+                if let Err(e) = res {
+                    if e.kind() == std::io::ErrorKind::PermissionDenied {
+                        perm_denied = Some(path.display().to_string());
+                    } else {
+                        return Err(AppError::from(e));
+                    }
                 }
             }
+            // Leave the record in place so the user can retry (with elevation).
+            if let Some(p) = perm_denied {
+                return Err(AppError::msg(format!(
+                    "削除できませんでした: {p}\nPermission denied (os error 13)"
+                )));
+            }
         }
-        // Leave the record in place so the user can retry (with elevation).
-        if let Some(p) = perm_denied {
-            return Err(AppError::msg(format!(
-                "削除できませんでした: {p}\nPermission denied (os error 13)"
-            )));
-        }
-    }
 
-    pkg.installs.retain(|r| r.id != record_id);
-    store.upsert(pkg.clone())?;
-    Ok(pkg)
+        pkg.installs.retain(|r| r.id != record_id);
+        store.upsert(pkg.clone())?;
+        log_action(store, "uninstall", Some(&pkg), &record.label);
+        Ok(pkg)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn export_library(app: AppHandle, package_ids: Vec<String>, dest: String) -> AppResult<usize> {
-    let store = store(&app)?;
-    archive::export_library(&store, &package_ids, Path::new(&dest))
+pub async fn export_library(
+    app: AppHandle,
+    package_ids: Vec<String>,
+    dest: String,
+) -> AppResult<usize> {
+    library_task(app, move |store| {
+        archive::export_library(store, &package_ids, Path::new(&dest))
+    })
+    .await
 }
 
 /// Export one package as a self-contained distribution `.zip`
 /// (manifest + banner + files).
 #[tauri::command]
-pub fn export_package(app: AppHandle, id: String, dest: String) -> AppResult<()> {
-    let store = store(&app)?;
-    archive::export_package(&store, &id, Path::new(&dest))
+pub async fn export_package(app: AppHandle, id: String, dest: String) -> AppResult<()> {
+    library_task(app, move |store| {
+        archive::export_package(store, &id, Path::new(&dest))
+    })
+    .await
 }
 
 #[tauri::command]
 pub fn import_archive(app: AppHandle, zip_path: String) -> AppResult<Vec<Package>> {
+    let _guard = operation_guard()?;
     let store = store(&app)?;
     archive::import_archive(&store, Path::new(&zip_path))
 }
@@ -719,11 +1153,16 @@ pub fn import_archive(app: AppHandle, zip_path: String) -> AppResult<Vec<Package
 /// existing, bundleable packages).
 #[tauri::command]
 pub fn create_bundle(app: AppHandle, name: String, package_ids: Vec<String>) -> AppResult<Bundle> {
+    let _guard = operation_guard()?;
     let store = store(&app)?;
     let lib = store.load()?;
     let members: Vec<String> = package_ids
         .into_iter()
-        .filter(|pid| lib.packages.iter().any(|p| &p.id == pid && p.kind.bundleable()))
+        .filter(|pid| {
+            lib.packages
+                .iter()
+                .any(|p| &p.id == pid && p.kind.bundleable())
+        })
         .collect();
     let ts = now();
     let bundle = Bundle {
@@ -744,6 +1183,7 @@ pub fn create_bundle(app: AppHandle, name: String, package_ids: Vec<String>) -> 
 /// Set a bundle's banner image from the file at `source_path`.
 #[tauri::command]
 pub fn set_bundle_banner(app: AppHandle, id: String, source_path: String) -> AppResult<Bundle> {
+    let _guard = operation_guard()?;
     let store = store(&app)?;
     let mut bundle = store.get_bundle(&id)?;
     let banner_name = write_banner_file(&store.bundle_dir(&id), &PathBuf::from(&source_path))?;
@@ -753,8 +1193,22 @@ pub fn set_bundle_banner(app: AppHandle, id: String, source_path: String) -> App
     Ok(bundle)
 }
 
+/// Replace a bundle banner with the image currently on the clipboard.
+#[tauri::command]
+pub fn set_bundle_banner_clipboard(app: AppHandle, id: String) -> AppResult<Bundle> {
+    let _guard = operation_guard()?;
+    let store = store(&app)?;
+    let mut bundle = store.get_bundle(&id)?;
+    let banner_name = write_banner_from_clipboard(&store.bundle_dir(&id))?;
+    bundle.banner = Some(banner_name);
+    bundle.updated_at = now();
+    store.upsert_bundle(bundle.clone())?;
+    Ok(bundle)
+}
+
 #[tauri::command]
 pub fn clear_bundle_banner(app: AppHandle, id: String) -> AppResult<Bundle> {
+    let _guard = operation_guard()?;
     let store = store(&app)?;
     let mut bundle = store.get_bundle(&id)?;
     if let Some(banner) = bundle.banner.take() {
@@ -779,11 +1233,20 @@ pub fn read_bundle_banner(app: AppHandle, id: String) -> AppResult<Option<String
 /// (effect plugins / scripts only).
 #[tauri::command]
 pub fn update_bundle(app: AppHandle, bundle: Bundle) -> AppResult<Bundle> {
+    let _guard = operation_guard()?;
     let store = store(&app)?;
+    let mut b = store.get_bundle(&bundle.id)?;
     let lib = store.load()?;
-    let mut b = bundle;
-    b.package_ids
-        .retain(|pid| lib.packages.iter().any(|p| p.id == *pid && p.kind.bundleable()));
+    b.name = bundle.name;
+    b.description = bundle.description;
+    b.author = bundle.author;
+    b.homepage = bundle.homepage;
+    b.package_ids = bundle.package_ids;
+    b.package_ids.retain(|pid| {
+        lib.packages
+            .iter()
+            .any(|p| p.id == *pid && p.kind.bundleable())
+    });
     b.updated_at = now();
     store.upsert_bundle(b.clone())?;
     Ok(b)
@@ -791,129 +1254,51 @@ pub fn update_bundle(app: AppHandle, bundle: Bundle) -> AppResult<Bundle> {
 
 #[tauri::command]
 pub fn delete_bundle(app: AppHandle, id: String) -> AppResult<()> {
+    let _guard = operation_guard()?;
     store(&app)?.remove_bundle(&id)
 }
 
-/// Install every member of a bundle to the given target (a whole series).
+/// Bundles and selections share preflight, rollback and one elevation prompt.
 #[tauri::command]
-pub fn install_bundle(app: AppHandle, id: String, params: InstallParams) -> AppResult<Vec<Package>> {
-    let store = store(&app)?;
-    let bundle = store.get_bundle(&id)?;
-    let params = resolve_install_params(params)?;
-
-    if params.elevated.unwrap_or(false) {
-        // Batch every member's copies into ONE elevated operation, so the user
-        // authenticates once for the whole series instead of per member.
-        return install_ids_elevated(&store, &bundle.package_ids, &params, true);
-    }
-
-    let mut out = Vec::new();
-    for pid in &bundle.package_ids {
-        match store.get(pid) {
-            Ok(pkg) if pkg.kind.bundleable() => out.push(install_one(&store, pid, &params)?),
-            _ => {}
-        }
-    }
-    Ok(out)
+pub async fn install_bundle(
+    app: AppHandle,
+    id: String,
+    params: InstallParams,
+) -> AppResult<Vec<Package>> {
+    library_task(app, move |store| {
+        let bundle = store.get_bundle(&id)?;
+        let params = resolve_install_params(params)?;
+        let requests: Vec<_> = bundle
+            .package_ids
+            .iter()
+            .filter(|id| store.get(id).is_ok_and(|p| p.kind.bundleable()))
+            .map(|id| (id.clone(), params.clone()))
+            .collect();
+        crate::deployment::apply(store, &requests)
+    })
+    .await
 }
 
-/// Install several packages (by id) at once. Elevated installs are batched into
-/// a single auth/UAC prompt. Re-installing an already-installed target updates
-/// it. Used by the multi-select "install selected" action.
 #[tauri::command]
-pub fn install_packages(
+pub async fn install_packages(
     app: AppHandle,
     ids: Vec<String>,
     params: InstallParams,
 ) -> AppResult<Vec<Package>> {
-    let store = store(&app)?;
-    let params = resolve_install_params(params)?;
-    if params.elevated.unwrap_or(false) {
-        return install_ids_elevated(&store, &ids, &params, false);
-    }
-    let mut out = Vec::new();
-    for id in &ids {
-        out.push(install_one(&store, id, &params)?);
-    }
-    Ok(out)
-}
-
-/// Install a set of packages (by id) with a single elevated copy (one auth / UAC
-/// prompt), then record where each package landed. `bundleable_only` skips
-/// non-bundleable members (used for bundles/series).
-fn install_ids_elevated(
-    store: &LibraryStore,
-    ids: &[String],
-    params: &InstallParams,
-    bundleable_only: bool,
-) -> AppResult<Vec<Package>> {
-    let effect_subdir = params.effect_subdir.as_deref().filter(|s| !s.trim().is_empty());
-    let mut all_copies: Vec<(PathBuf, PathBuf)> = Vec::new();
-    let mut staged: Vec<(Package, InstallRecord)> = Vec::new();
-
-    for pid in ids {
-        let pkg = match store.get(pid) {
-            Ok(p) if !bundleable_only || p.kind.bundleable() => p,
-            _ => continue,
-        };
-        let primary = params.kind.unwrap_or(pkg.kind);
-        let files_dir = store.files_dir(&pkg.id);
-
-        let (copies, written, target_str, label, ae) = match params.custom_dir.as_deref() {
-            Some(dir) if !dir.trim().is_empty() => {
-                let (c, w) = installer::plan_copies(&files_dir, |_| PathBuf::from(dir))?;
-                (c, w, dir.to_string(), format!("カスタム: {dir}"), None)
-            }
-            _ => {
-                let ae = params
-                    .installation
-                    .clone()
-                    .ok_or_else(|| AppError::msg("インストール先が指定されていません"))?;
-                let (c, w) = installer::plan_copies(&files_dir, |p| {
-                    installer::route(&ae, installer::entry_kind(p), primary, effect_subdir)
-                })?;
-                let target = installer::route(&ae, primary, primary, effect_subdir)
-                    .to_string_lossy()
-                    .to_string();
-                (c, w, target, ae.name.clone(), Some(ae))
-            }
-        };
-
-        all_copies.extend(copies);
-        staged.push((
-            pkg,
-            InstallRecord {
-                id: uuid::Uuid::new_v4().to_string(),
-                label: params
-                    .label
-                    .clone()
-                    .filter(|l| !l.trim().is_empty())
-                    .unwrap_or(label),
-                kind: primary,
-                target_dir: target_str,
-                ae,
-                paths: written,
-                installed_at: now(),
-            },
-        ));
-    }
-
-    // The single elevated write for the entire series.
-    installer::elevated_copy(&all_copies)?;
-
-    let mut out = Vec::new();
-    for (mut pkg, record) in staged {
-        pkg.installs.retain(|r| r.target_dir != record.target_dir);
-        pkg.installs.push(record);
-        store.upsert(pkg.clone())?;
-        out.push(pkg);
-    }
-    Ok(out)
+    library_task(app, move |store| {
+        let params = resolve_install_params(params)?;
+        let ids: std::collections::BTreeSet<_> = ids.into_iter().collect();
+        let requests: Vec<_> = ids.into_iter().map(|id| (id, params.clone())).collect();
+        crate::deployment::apply(store, &requests)
+    })
+    .await
 }
 
 /// Export a bundle as a single distribution `.zip` (the whole series).
 #[tauri::command]
-pub fn export_bundle(app: AppHandle, id: String, dest: String) -> AppResult<()> {
-    let store = store(&app)?;
-    archive::export_bundle(&store, &id, Path::new(&dest))
+pub async fn export_bundle(app: AppHandle, id: String, dest: String) -> AppResult<()> {
+    library_task(app, move |store| {
+        archive::export_bundle(store, &id, Path::new(&dest))
+    })
+    .await
 }

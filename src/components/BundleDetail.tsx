@@ -20,6 +20,7 @@ interface Props {
   onExport: (bundle: Bundle) => void;
   onDelete: (bundle: Bundle) => void;
   onSetBanner: (id: string) => void;
+  onSetBannerClipboard: (id: string) => void;
   onClearBanner: (id: string) => void;
 }
 
@@ -42,6 +43,7 @@ function BundleBody({
   onExport,
   onDelete,
   onSetBanner,
+  onSetBannerClipboard,
   onClearBanner,
 }: Props & { bundle: Bundle }) {
   const t = useT();
@@ -53,7 +55,8 @@ function BundleBody({
   const [homepage, setHomepage] = useState(bundle.homepage);
   const [description, setDescription] = useState(bundle.description);
   const [memberIds, setMemberIds] = useState<string[]>(bundle.package_ids);
-  const [aeSel, setAeSel] = useState<string>(aeInstalls.length ? "0" : "custom");
+  const [aeSel, setAeSel] = useState<string>(aeInstalls[0]?.root ?? "");
+  const selectedAe = aeInstalls.find((ae) => ae.root === aeSel) ?? aeInstalls[0];
   // Member list is collapsed to the first few by default.
   const [membersExpanded, setMembersExpanded] = useState(false);
 
@@ -88,7 +91,7 @@ function BundleBody({
   };
 
   const doInstall = () => {
-    const ae = aeInstalls[Number(aeSel)];
+    const ae = selectedAe;
     if (ae) onInstall(bundle, { installation: ae });
   };
 
@@ -111,6 +114,13 @@ function BundleBody({
             <button className="banner-edit" onClick={() => onSetBanner(bundle.id)}>
               <i className="bi bi-image" /> {t("detail.changeBanner")}
             </button>
+            <button
+              className="banner-edit banner-info-btn"
+              title={t("detail.bannerFromClipboard")}
+              onClick={() => onSetBannerClipboard(bundle.id)}
+            >
+              <i className="bi bi-clipboard" />
+            </button>
             {bundle.banner && (
               <button
                 className="banner-edit banner-info-btn"
@@ -131,7 +141,7 @@ function BundleBody({
           ) : (
             <>
               <h2 className="detail-title">{bundle.name}</h2>
-              <button className="icon-btn" title={t("common.edit")} onClick={() => setEditing(true)}>
+            <button className="icon-btn" title={t("common.edit")} onClick={() => { cancel(); setEditing(true); }}>
                 <i className="bi bi-pencil" />
               </button>
             </>
@@ -246,9 +256,9 @@ function BundleBody({
             <h3>{t("section.install")}</h3>
             {aeInstalls.length > 0 && (
               <label className="field">
-                <select value={aeSel} onChange={(e) => setAeSel(e.target.value)}>
-                  {aeInstalls.map((ae, i) => (
-                    <option key={ae.root} value={String(i)}>
+                <select value={selectedAe?.root ?? ""} onChange={(e) => setAeSel(e.target.value)}>
+                  {aeInstalls.map((ae) => (
+                    <option key={ae.root} value={ae.root}>
                       {ae.name}
                     </option>
                   ))}

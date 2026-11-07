@@ -6,9 +6,19 @@ import type {
   Manifest,
   Package,
   PackageKind,
+  PreparedImport, ActivityEvent, Revision, IntegrityEntry,
 } from "../types";
 
+export interface HelperStatus {
+  supported: boolean;
+  available: boolean;
+  enabled: boolean;
+  unlocked: boolean;
+  status: string;
+}
+
 export interface InstallParams {
+  allow_overwrite?: boolean;
   installation?: AeInstallation | null;
   kind?: PackageKind | null;
   custom_dir?: string | null;
@@ -18,6 +28,16 @@ export interface InstallParams {
 }
 
 export const api = {
+  takeOperationWarnings: () => invoke<string[]>("take_operation_warnings"),
+  prepareImport: (paths: string[]) => invoke<PreparedImport>("prepare_import", { paths }),
+  commitImport: (token: string) => invoke<Package[]>("commit_import", { token }),
+  discardImport: (id: string, replacementId: string) => invoke<void>("discard_import", { id, replacementId }),
+  cancelImport: (token: string) => invoke<void>("cancel_import", { token }),
+  checkIntegrity: (id?: string) => invoke<IntegrityEntry[]>("check_integrity", { id: id ?? null }),
+  getHistory: () => invoke<ActivityEvent[]>("get_history"),
+  getRevisions: (id: string) => invoke<Revision[]>("get_revisions", { id }),
+  restoreRevision: (id: string, revisionId: string) => invoke<Package>("restore_revision", { id, revisionId }),
+  reinstallPackage: (id: string, params: InstallParams) => invoke<Package>("reinstall_package", { id, params }),
   getLibrary: () => invoke<Library>("get_library"),
 
   getDataDir: () => invoke<string>("get_data_dir"),
@@ -44,6 +64,9 @@ export const api = {
   setBanner: (id: string, sourcePath: string) =>
     invoke<Package>("set_banner", { id, sourcePath }),
 
+  setBannerClipboard: (id: string) =>
+    invoke<Package>("set_banner_clipboard", { id }),
+
   clearBanner: (id: string) => invoke<Package>("clear_banner", { id }),
 
   readBanner: (id: string) => invoke<string | null>("read_banner", { id }),
@@ -52,6 +75,11 @@ export const api = {
 
   /** Reveal a file/folder in Finder (macOS) or Explorer (Windows). */
   revealPath: (path: string) => invoke<void>("reveal_path", { path }),
+
+  helperStatus: () => invoke<HelperStatus>("helper_status"),
+  helperRegister: () => invoke<HelperStatus>("helper_register"),
+  helperUnregister: () => invoke<HelperStatus>("helper_unregister"),
+  helperAuthenticate: () => invoke<void>("helper_authenticate"),
 
   adminStatus: () => invoke<{ supported: boolean; unlocked: boolean }>("admin_status"),
   adminUnlock: (password: string) => invoke<void>("admin_unlock", { password }),
@@ -89,6 +117,9 @@ export const api = {
 
   setBundleBanner: (id: string, sourcePath: string) =>
     invoke<Bundle>("set_bundle_banner", { id, sourcePath }),
+
+  setBundleBannerClipboard: (id: string) =>
+    invoke<Bundle>("set_bundle_banner_clipboard", { id }),
 
   clearBundleBanner: (id: string) => invoke<Bundle>("clear_bundle_banner", { id }),
 

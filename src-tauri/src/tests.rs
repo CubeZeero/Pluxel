@@ -18,13 +18,221 @@ fn tmp(tag: &str) -> PathBuf {
     p
 }
 
+#[test]
+fn primary_and_containing_folder_cannot_be_removed() {
+    let root = tmp("primary-protection").canonicalize().unwrap();
+    let src = root.join("Tool");
+    fs::create_dir(&src).unwrap();
+    fs::write(src.join("main.jsx"), b"script").unwrap();
+    fs::write(src.join("readme.txt"), b"manual").unwrap();
+    let store = LibraryStore::new(root.join("vault")).unwrap();
+    let pkg = importer::import_path(&store, &src).unwrap();
+    for path in [".", "Tool", "Tool/main.jsx", "../outside", "/absolute"] {
+        assert!(
+            crate::commands::remove_companion(&store, &pkg.id, path).is_err(),
+            "{path}"
+        );
+        assert!(store.files_dir(&pkg.id).join("Tool/main.jsx").exists());
+    }
+    crate::commands::remove_companion(&store, &pkg.id, "Tool/readme.txt").unwrap();
+    assert!(!store.files_dir(&pkg.id).join("Tool/readme.txt").exists());
+    let revision = crate::activity::revisions(&store, &pkg.id)
+        .unwrap()
+        .remove(0);
+    crate::activity::restore(&store, &pkg.id, &revision.id).unwrap();
+    assert!(store.files_dir(&pkg.id).join("Tool/readme.txt").exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn companion_add_failure_never_overwrites_primary_or_leaves_stale_metadata() {
+    let root = tmp("companion-atomic").canonicalize().unwrap();
+    let original = root.join("Tool.jsx");
+    fs::write(&original, b"original").unwrap();
+    let store = LibraryStore::new(root.join("vault")).unwrap();
+    let pkg = importer::import_path(&store, &original).unwrap();
+    let replacement = root.join("new");
+    fs::create_dir(&replacement).unwrap();
+    let replacement = replacement.join("Tool.jsx");
+    fs::write(&replacement, b"replacement with different size").unwrap();
+    assert!(crate::commands::add_companions(
+        &store,
+        &pkg.id,
+        &[
+            replacement.to_string_lossy().into(),
+            root.join("missing").to_string_lossy().into()
+        ]
+    )
+    .is_err());
+    assert_eq!(
+        fs::read(store.files_dir(&pkg.id).join("Tool.jsx")).unwrap(),
+        b"original"
+    );
+    assert_eq!(store.get(&pkg.id).unwrap().files[0].size, 8);
+    // A snapshot can still be taken: the index and actual content agree.
+    crate::activity::snapshot(&store, &store.get(&pkg.id).unwrap(), "test").unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn import_commit_succeeds_even_when_history_cannot_be_saved() {
+    let root = tmp("history-failure").canonicalize().unwrap();
+    let source = root.join("Example.jsx");
+    fs::write(&source, b"script").unwrap();
+    let store = LibraryStore::new(root.join("vault")).unwrap();
+    let prepared = crate::preview::prepare(&store, &[source.to_string_lossy().into()]).unwrap();
+    fs::create_dir(store.root().join("activity.json")).unwrap();
+    let result = crate::commands::commit_prepared(&store, &prepared.token).unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(store.load().unwrap().packages.len(), 1);
+    assert!(crate::warnings::take()
+        .iter()
+        .any(|w| w == "maintenance.warningHistory"));
+    assert!(crate::preview::commit(&store, &prepared.token).is_err());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn preview_update_and_restore_preserve_bundle_membership_and_tags() {
+    let root = tmp("update-restore").canonicalize().unwrap();
+    let source = root.join("Tool.jsx");
+    fs::write(&source, b"version one").unwrap();
+    let store = LibraryStore::new(root.join("vault")).unwrap();
+    let mut old = importer::import_path(&store, &source).unwrap();
+    old.manifest.version = "1.0.0".into();
+    old.manifest.tags = vec!["favorite".into()];
+    store.write_manifest(&old.id, &old.manifest).unwrap();
+    store.upsert(old.clone()).unwrap();
+    fs::write(&source, b"version two").unwrap();
+    let prepared = crate::preview::prepare(&store, &[source.to_string_lossy().into()]).unwrap();
+    let mut imported = crate::commands::commit_prepared(&store, &prepared.token)
+        .unwrap()
+        .remove(0);
+    imported.manifest.version = "2.0.0".into();
+    store
+        .write_manifest(&imported.id, &imported.manifest)
+        .unwrap();
+    store.upsert(imported.clone()).unwrap();
+    let bid = uuid::Uuid::new_v4().to_string();
+    store
+        .upsert_bundle(Bundle {
+            id: bid.clone(),
+            name: "Series".into(),
+            description: String::new(),
+            author: String::new(),
+            homepage: String::new(),
+            banner: None,
+            package_ids: vec![imported.id.clone(), old.id.clone()],
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .unwrap();
+    let updated = crate::commands::replace_existing(&store, &old.id, &imported.id).unwrap();
+    assert_eq!(updated.manifest.version, "2.0.0");
+    assert_eq!(
+        store.get_bundle(&bid).unwrap().package_ids,
+        vec![old.id.clone()]
+    );
+    let revision = crate::activity::revisions(&store, &old.id)
+        .unwrap()
+        .remove(0);
+    let restored = crate::activity::restore(&store, &old.id, &revision.id).unwrap();
+    assert_eq!(restored.manifest.version, "1.0.0");
+    assert_eq!(restored.manifest.tags, vec!["favorite"]);
+    assert_eq!(
+        fs::read(store.files_dir(&old.id).join("Tool.jsx")).unwrap(),
+        b"version one"
+    );
+    assert_eq!(store.get_bundle(&bid).unwrap().package_ids, vec![old.id]);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn skipping_duplicate_import_keeps_the_existing_bundle_member() {
+    let root = tmp("skip-import").canonicalize().unwrap();
+    let path = root.join("Tool.jsx");
+    fs::write(&path, b"old").unwrap();
+    let store = LibraryStore::new(root.join("vault")).unwrap();
+    let old = importer::import_path(&store, &path).unwrap();
+    fs::write(&path, b"new").unwrap();
+    let new = importer::import_path(&store, &path).unwrap();
+    let bid = uuid::Uuid::new_v4().to_string();
+    store
+        .upsert_bundle(Bundle {
+            id: bid.clone(),
+            name: "Series".into(),
+            description: String::new(),
+            author: String::new(),
+            homepage: String::new(),
+            banner: None,
+            package_ids: vec![new.id.clone()],
+            created_at: String::new(),
+            updated_at: String::new(),
+        })
+        .unwrap();
+    crate::commands::discard_duplicate(&store, &new.id, &old.id).unwrap();
+    assert_eq!(
+        store.get_bundle(&bid).unwrap().package_ids,
+        vec![old.id.clone()]
+    );
+    assert_eq!(
+        fs::read(store.files_dir(&old.id).join("Tool.jsx")).unwrap(),
+        b"old"
+    );
+    store.remove(&old.id).unwrap();
+    assert!(store.get_bundle(&bid).unwrap().package_ids.is_empty());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn ppf_plugin_preview_and_install_preserve_execution_without_privileged_bits() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tmp("plugin-mode").canonicalize().unwrap();
+    let plugin = root.join("Test.plugin");
+    let binary = plugin.join("Contents/MacOS/Test");
+    fs::create_dir_all(binary.parent().unwrap()).unwrap();
+    fs::write(&binary, b"fake binary").unwrap();
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o4755)).unwrap();
+    let store = LibraryStore::new(root.join("vault")).unwrap();
+    let pkg = importer::import_path(&store, &plugin).unwrap();
+    let ppf = root.join("Test.ppf");
+    archive::export_package(&store, &pkg.id, &ppf).unwrap();
+    let store2 = LibraryStore::new(root.join("other-vault")).unwrap();
+    let prepared = crate::preview::prepare(&store2, &[ppf.to_string_lossy().into()]).unwrap();
+    let imported = crate::commands::commit_prepared(&store2, &prepared.token)
+        .unwrap()
+        .remove(0);
+    let target = root.join("installed");
+    let params = crate::commands::InstallParams {
+        installation: None,
+        kind: None,
+        custom_dir: Some(target.to_string_lossy().into()),
+        label: None,
+        elevated: Some(false),
+        effect_subdir: None,
+        allow_overwrite: false,
+    };
+    crate::deployment::apply(&store2, &[(imported.id, params)]).unwrap();
+    let mode = fs::metadata(target.join("Test.plugin/Contents/MacOS/Test"))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o7777;
+    assert_eq!(mode, 0o755);
+    fs::remove_dir_all(root).unwrap();
+}
+
 fn fake_ae(root: &std::path::Path) -> AeInstallation {
     AeInstallation {
         name: "AE Test 2024".into(),
         version: "2024".into(),
         root: root.to_string_lossy().into(),
         scripts_dir: root.join("Scripts").to_string_lossy().into(),
-        scriptui_dir: root.join("Scripts/ScriptUI Panels").to_string_lossy().into(),
+        scriptui_dir: root
+            .join("Scripts/ScriptUI Panels")
+            .to_string_lossy()
+            .into(),
         plugins_dir: root.join("Plug-ins").to_string_lossy().into(),
         cep_extensions_dir: root.join("CEP").to_string_lossy().into(),
     }
@@ -316,7 +524,10 @@ fn update_button_reinstalls_current_files() {
 
     let target = tmp("upd-target");
     installer::install_to(&store, &pkg, &target).unwrap();
-    assert_eq!(fs::read_to_string(target.join("Tool.jsx")).unwrap(), "// v1");
+    assert_eq!(
+        fs::read_to_string(target.join("Tool.jsx")).unwrap(),
+        "// v1"
+    );
 
     // The library copy is updated (e.g. user re-imported / replaced files)…
     let v2 = work.join("Tool.jsx");
@@ -346,7 +557,10 @@ fn non_elevated_install_needs_no_uac_for_writable_target() {
     // 1) Writable target → installs with NO elevation.
     let writable = tmp("writable-target");
     let written = installer::install_to(&store, &pkg, &writable).unwrap();
-    assert!(writable.join("Tool.jsx").exists(), "file installed without elevation");
+    assert!(
+        writable.join("Tool.jsx").exists(),
+        "file installed without elevation"
+    );
     assert_eq!(written.len(), 1);
 
     // 2) Read-only target → permission error, which is what triggers the
@@ -357,7 +571,10 @@ fn non_elevated_install_needs_no_uac_for_writable_target() {
         let locked = tmp("locked-target");
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
         let res = installer::install_to(&store, &pkg, &locked);
-        assert!(res.is_err(), "writing to a read-only folder should fail (→ elevate)");
+        assert!(
+            res.is_err(),
+            "writing to a read-only folder should fail (→ elevate)"
+        );
         // restore perms so the temp dir can be cleaned
         let _ = fs::set_permissions(&locked, fs::Permissions::from_mode(0o755));
     }
@@ -375,6 +592,8 @@ fn is_safe_segment_rejects_traversal() {
     assert!(!is_safe_segment("../evil"));
     assert!(!is_safe_segment("a/b"));
     assert!(!is_safe_segment("a\\b"));
+    assert!(!is_safe_segment("banner.png:stream"));
+    assert!(!is_safe_segment("banner\n.png"));
     assert!(!is_safe_segment("/etc/passwd"));
     assert!(!is_safe_segment("../../../../Users/victim/.ssh/id_rsa"));
 }
@@ -383,6 +602,7 @@ fn is_safe_segment_rejects_traversal() {
 fn resolve_install_params_validates_dirs_and_subdir() {
     use crate::commands::{resolve_install_params, InstallParams};
     let base = |custom: &str, elevated: bool, sub: Option<&str>| InstallParams {
+        allow_overwrite: false,
         installation: None,
         kind: None,
         custom_dir: Some(custom.to_string()),
@@ -393,7 +613,8 @@ fn resolve_install_params_validates_dirs_and_subdir() {
     // A traversal-y effect subfolder is rejected.
     assert!(resolve_install_params(base("/Users/me/Effects", false, Some("../evil"))).is_err());
     // A plain subfolder + normal folder is accepted.
-    assert!(resolve_install_params(base("/Users/me/Effects", true, Some("Effects"))).is_ok());
+    let normal = std::env::current_dir().unwrap().join("Effects");
+    assert!(resolve_install_params(base(&normal.to_string_lossy(), true, Some("Effects"))).is_ok());
     #[cfg(target_os = "macos")]
     {
         // Elevated install into a privileged location is rejected.
@@ -405,13 +626,32 @@ fn resolve_install_params_validates_dirs_and_subdir() {
 fn reject_privileged_dir_blocks_system_locations() {
     use crate::commands::reject_privileged_dir;
     // A normal user folder is allowed.
-    assert!(reject_privileged_dir("/Users/me/Effects").is_ok());
+    let normal = std::env::current_dir().unwrap().join("Effects");
+    assert!(reject_privileged_dir(&normal.to_string_lossy()).is_ok());
     #[cfg(target_os = "macos")]
     {
         assert!(reject_privileged_dir("/Library/LaunchDaemons").is_err());
         assert!(reject_privileged_dir("/Library/LaunchDaemons/evil").is_err());
         assert!(reject_privileged_dir("/System/Library").is_err());
         assert!(reject_privileged_dir("/usr/local/bin").is_err());
+        assert!(reject_privileged_dir("/Applications/../Library/LaunchDaemons").is_err());
+        assert!(reject_privileged_dir("/").is_err());
+        // Resolve a benign-looking path that links into a blocked directory.
+        let work = tmp("privileged-link");
+        let link = work.join("effects");
+        std::os::unix::fs::symlink("/System", &link).unwrap();
+        assert!(reject_privileged_dir(&link.join("new-folder").to_string_lossy()).is_err());
+        let home = std::env::var("HOME").unwrap();
+        assert!(reject_privileged_dir(&format!("{home}/PluxelTestNotCreated/Effects")).is_ok());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let system = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
+        assert!(reject_privileged_dir(&system).is_err());
+        assert!(reject_privileged_dir("C:/Users/../Windows").is_err());
+        let ae = "C:/Program Files/Adobe/Adobe After Effects/Support Files/Scripts";
+        assert!(crate::paths::reject_elevated_destination(ae).is_ok());
+        assert!(reject_privileged_dir(ae).is_err());
     }
 }
 
@@ -431,7 +671,10 @@ fn replace_keeps_metadata_for_plain_file_but_adopts_package() {
     };
 
     // Replaced by a plain file (no manifest metadata) → keep existing info.
-    let bare = Manifest { name: "Glow".into(), ..Manifest::default() };
+    let bare = Manifest {
+        name: "Glow".into(),
+        ..Manifest::default()
+    };
     let m = merged_replace_manifest(existing.clone(), bare);
     assert_eq!(m.version, "2.1");
     assert_eq!(m.author, "NF");
@@ -461,15 +704,20 @@ fn install_to_ae_routes_by_extension() {
     // A package bundling a script, a plugin and a companion image.
     let work = tmp("work-route");
     let bundle = work.join("MixedTool");
+    let effect_name = if cfg!(target_os = "macos") {
+        "Effect.plugin"
+    } else {
+        "Effect.aex"
+    };
     fs::create_dir_all(&bundle).unwrap();
     fs::write(bundle.join("Tool.jsx"), "// script").unwrap();
-    fs::write(bundle.join("Effect.aex"), b"plugin").unwrap();
+    fs::write(bundle.join(effect_name), b"plugin").unwrap();
     fs::write(bundle.join("preview.png"), b"\x89PNG").unwrap();
 
     let store = LibraryStore::new(tmp("store-route")).unwrap();
     // Import each file individually so files/ has three top-level entries.
     let pkg = importer::import_path(&store, &bundle.join("Tool.jsx")).unwrap();
-    importer::add_source(&store, &pkg.id, &bundle.join("Effect.aex")).unwrap();
+    importer::add_source(&store, &pkg.id, &bundle.join(effect_name)).unwrap();
     importer::add_source(&store, &pkg.id, &bundle.join("preview.png")).unwrap();
     let mut pkg = store.get(&pkg.id).unwrap();
     importer::rescan(&store, &mut pkg).unwrap();
@@ -480,15 +728,89 @@ fn install_to_ae_routes_by_extension() {
 
     // .jsx → Scripts, .aex → Plug-ins, companion image follows primary (Scripts).
     assert!(ae_root.join("Scripts/Tool.jsx").exists());
-    assert!(ae_root.join("Plug-ins/Effect.aex").exists());
+    assert!(ae_root.join("Plug-ins").join(effect_name).exists());
     assert!(ae_root.join("Scripts/preview.png").exists());
     assert!(!ae_root.join("Plug-ins/preview.png").exists());
 }
 
 #[test]
+fn install_to_ae_skips_doc_files() {
+    // A script package bundling a PDF manual as a companion.
+    let work = tmp("work-doc");
+    fs::create_dir_all(&work).unwrap();
+    let script = work.join("Tool.jsx");
+    fs::write(&script, "// script").unwrap();
+    fs::write(work.join("Manual.pdf"), b"%PDF-1.4").unwrap();
+
+    let store = LibraryStore::new(tmp("store-doc")).unwrap();
+    let pkg = importer::import_path(&store, &script).unwrap();
+    importer::add_source(&store, &pkg.id, &work.join("Manual.pdf")).unwrap();
+    let mut pkg = store.get(&pkg.id).unwrap();
+    importer::rescan(&store, &mut pkg).unwrap();
+
+    // The manual is stored (so it rides along in exports) ...
+    assert!(store.files_dir(&pkg.id).join("Manual.pdf").exists());
+
+    let ae_root = tmp("ae-doc");
+    let ae = fake_ae(&ae_root);
+    let written = installer::install_to_ae(&store, &pkg, &ae, PackageKind::Script, None).unwrap();
+
+    // ... but is not copied into After Effects; only the script lands.
+    assert!(ae_root.join("Scripts/Tool.jsx").exists());
+    assert!(!ae_root.join("Scripts/Manual.pdf").exists());
+    assert!(written.iter().all(|p| !p.ends_with("Manual.pdf")));
+
+    // Permission-error retries, bundles and batch installs all use this plan.
+    let files = store.files_dir(&pkg.id);
+    let (copies, planned) =
+        installer::plan_copies(&files, |_| PathBuf::from(&ae.scripts_dir)).unwrap();
+    assert_eq!(copies.len(), 1);
+    assert!(copies[0].0.ends_with("Tool.jsx"));
+    assert!(planned.iter().all(|p| !p.ends_with("Manual.pdf")));
+
+    let custom = tmp("doc-custom");
+    let written = installer::install_to(&store, &pkg, &custom).unwrap();
+    assert_eq!(written.len(), 1);
+    assert!(!custom.join("Manual.pdf").exists());
+}
+
+#[test]
+fn clipboard_banner_validates_and_preserves_previous_on_failure() {
+    use crate::commands::write_clipboard_image;
+    let dir = tmp("banner-atomic");
+    let banner = dir.join("banner.png");
+    fs::write(&banner, b"previous banner").unwrap();
+    for (w, h, bytes) in [(0, 1, vec![]), (usize::MAX, 2, vec![]), (1, 1, vec![0; 3])] {
+        assert!(write_clipboard_image(&dir, w, h, &bytes).is_err());
+        assert_eq!(fs::read(&banner).unwrap(), b"previous banner");
+    }
+    // Verify valid output by decoding, not just checking the encoder returned.
+    let rgba = [255, 128, 64, 255];
+    write_clipboard_image(&dir, 1, 1, &rgba).unwrap();
+    let decoder = png::Decoder::new(fs::File::open(&banner).unwrap());
+    let mut reader = decoder.read_info().unwrap();
+    let mut buffer = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buffer).unwrap();
+    assert_eq!(&buffer[..info.buffer_size()], &rgba);
+
+    // A failed final rename must clean the temporary file and retain the target.
+    fs::remove_file(&banner).unwrap();
+    fs::create_dir(&banner).unwrap();
+    fs::write(banner.join("sentinel"), b"keep").unwrap();
+    assert!(write_clipboard_image(&dir, 1, 1, &rgba).is_err());
+    assert_eq!(fs::read(banner.join("sentinel")).unwrap(), b"keep");
+    assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+}
+
+#[test]
 fn effect_subdir_nests_plugins() {
     let work = tmp("work-eff");
-    let plugin = work.join("NF_Glow.aex");
+    let effect_name = if cfg!(target_os = "macos") {
+        "NF_Glow.plugin"
+    } else {
+        "NF_Glow.aex"
+    };
+    let plugin = work.join(effect_name);
     fs::write(&plugin, b"plugin").unwrap();
 
     let store = LibraryStore::new(tmp("store-eff")).unwrap();
@@ -500,8 +822,8 @@ fn effect_subdir_nests_plugins() {
     installer::install_to_ae(&store, &pkg, &ae, PackageKind::Plugin, Some("Effects")).unwrap();
 
     // Plugin nested under Plug-ins/Effects/.
-    assert!(ae_root.join("Plug-ins/Effects/NF_Glow.aex").exists());
-    assert!(!ae_root.join("Plug-ins/NF_Glow.aex").exists());
+    assert!(ae_root.join("Plug-ins/Effects").join(effect_name).exists());
+    assert!(!ae_root.join("Plug-ins").join(effect_name).exists());
 }
 
 #[test]
@@ -536,7 +858,10 @@ fn distribution_export_import_roundtrip() {
     assert!(p.manifest.tags.is_empty()); // tags excluded from distribution
     assert_eq!(p.banner.as_deref(), Some("banner.png"));
     assert_eq!(p.kind, PackageKind::Script);
-    assert!(store2.files_dir(&p.id).join("NiceScript/NiceScript.jsx").exists());
+    assert!(store2
+        .files_dir(&p.id)
+        .join("NiceScript/NiceScript.jsx")
+        .exists());
 }
 
 #[test]
@@ -605,7 +930,11 @@ fn library_backup_preserves_bundle_with_banner() {
     let b2 = &lib2.bundles[0];
     assert_eq!(b2.name, "Alpha Series");
     assert_eq!(b2.package_ids.len(), 1);
-    assert_eq!(b2.banner.as_deref(), Some("banner.png"), "banner reference kept");
+    assert_eq!(
+        b2.banner.as_deref(),
+        Some("banner.png"),
+        "banner reference kept"
+    );
     let banner_path = store2.bundle_dir(&b2.id).join("banner.png");
     assert!(banner_path.exists(), "banner file restored on disk");
     assert_eq!(fs::read(&banner_path).unwrap(), b"\x89PNG-fake");
@@ -640,7 +969,7 @@ fn distribution_export_omits_tags_in_every_manifest() {
     let mut manifests_seen = 0;
     for i in 0..zip.len() {
         let mut e = zip.by_index(i).unwrap();
-        let name = e.name().to_string();
+        let name = e.name().unwrap().into_owned();
         if name.ends_with("manifest.json") {
             let mut s = String::new();
             e.read_to_string(&mut s).unwrap();
@@ -650,7 +979,10 @@ fn distribution_export_omits_tags_in_every_manifest() {
         }
     }
     // Both the Pluxel root manifest and the bundled nested one were checked.
-    assert!(manifests_seen >= 2, "expected >=2 manifest.json entries, saw {manifests_seen}");
+    assert!(
+        manifests_seen >= 2,
+        "expected >=2 manifest.json entries, saw {manifests_seen}"
+    );
 }
 
 #[test]
@@ -722,6 +1054,7 @@ fn install_to_all_targets_every_ae() {
     let ae2 = tmp("ae-all-2");
     let aes = vec![fake_ae(&ae1), fake_ae(&ae2)];
     let params = crate::commands::InstallParams {
+        allow_overwrite: false,
         installation: None,
         kind: None,
         custom_dir: None,

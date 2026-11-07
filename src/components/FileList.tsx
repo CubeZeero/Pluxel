@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useT } from "../lib/i18n";
-import { isBundleSeg, topSeg } from "../lib/files";
+import { isBundleSeg, topSeg, primaryAssetPath } from "../lib/files";
 import type { Package, PackageKind } from "../types";
 
 function fmtSize(bytes: number): string {
@@ -8,6 +8,17 @@ function fmtSize(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
+
+// Documentation/manual formats — shown with a distinct icon; bundled for
+// distribution but not installed into After Effects (see installer.rs).
+const DOC_EXTS = new Set([
+  "pdf", "doc", "docx", "rtf", "odt", "pages", "ppt", "pptx", "xls", "xlsx", "chm", "epub",
+  "md", "txt", "html", "htm",
+]);
+const extOf = (p: string) => p.split(".").pop()?.toLowerCase() ?? "";
+const isDoc = (p: string) => DOC_EXTS.has(extOf(p));
+const fileIcon = (p: string) =>
+  isDoc(p) ? (extOf(p) === "pdf" ? "bi-file-earmark-pdf" : "bi-file-earmark-text") : "bi-file-earmark";
 
 type FileNode = { path: string; size: number; kind: PackageKind; bundle: boolean };
 
@@ -35,11 +46,6 @@ export function FileList({ pkg, editing, onRemoveFile }: Props) {
       return next;
     });
 
-  const inBundle = (p: string) => {
-    const seg = topSeg(p);
-    return !!seg && isBundleSeg(seg);
-  };
-
   const bundleNames = [
     ...new Set(pkg.files.map((f) => topSeg(f.rel_path)).filter((s): s is string => !!s && isBundleSeg(s))),
   ];
@@ -55,14 +61,12 @@ export function FileList({ pkg, editing, onRemoveFile }: Props) {
 
   // Primary asset (script/plugin body) — pinned to the top and highlighted.
   const flat = [...topFileNodes, ...bundleNodes];
-  let mainNode: FileNode | null = flat.find((n) => n.kind === pkg.kind) ?? null;
-  if (!mainNode) {
-    const nested = pkg.files.find(
-      (f) => !inBundle(f.rel_path) && f.rel_path.includes("/") && f.kind === pkg.kind,
-    );
-    if (nested) mainNode = { path: nested.rel_path, size: nested.size, kind: nested.kind, bundle: false };
+  const primary = primaryAssetPath(pkg);
+  let mainNode: FileNode | null = flat.find((n) => n.path === primary) ?? null;
+  if (!mainNode && primary) {
+    const source = pkg.files.filter((f) => f.rel_path === primary || f.rel_path.startsWith(primary + "/"));
+    if (source.length) mainNode = {path: primary, size: source.reduce((n,f) => n + f.size,0), kind: pkg.kind, bundle: isBundleSeg(primary.split("/").pop() ?? "")};
   }
-  if (!mainNode) mainNode = flat[0] ?? null;
   const otherRows = flat.filter((n) => n !== mainNode);
 
   // Real folders (excluding bundles and the pinned main file).
@@ -70,14 +74,14 @@ export function FileList({ pkg, editing, onRemoveFile }: Props) {
   for (const f of pkg.files) {
     const seg = topSeg(f.rel_path);
     if (!seg || isBundleSeg(seg)) continue;
-    if (mainNode && f.rel_path === mainNode.path) continue;
+    if (mainNode && (f.rel_path === mainNode.path || f.rel_path.startsWith(mainNode.path + "/"))) continue;
     const arr = folders.get(seg) ?? [];
     arr.push(f);
     folders.set(seg, arr);
   }
 
   const delBtn = (relPath: string) =>
-    editing && (
+    editing && !(primary && (relPath === primary || primary.startsWith(relPath + "/") || relPath.startsWith(primary + "/"))) && (
       <button
         className="file-del"
         title={t("files.removeTip")}
@@ -102,9 +106,10 @@ export function FileList({ pkg, editing, onRemoveFile }: Props) {
       {otherRows.map((n) => (
         <li key={n.path} className="file-item">
           <span className="file-name">
-            <i className={`bi ${n.bundle ? "bi-box-seam" : "bi-file-earmark"}`} />
+            <i className={`bi ${n.bundle ? "bi-box-seam" : fileIcon(n.path)}`} />
             {n.path}
           </span>
+          {!n.bundle && isDoc(n.path) && <span className="main-tag doc-tag">{t("files.docTag")}</span>}
           <span className="file-size">{fmtSize(n.size)}</span>
           {delBtn(n.path)}
         </li>
@@ -135,7 +140,7 @@ export function FileList({ pkg, editing, onRemoveFile }: Props) {
                 {files.map((f) => (
                   <li key={f.rel_path}>
                     <span className="file-name">
-                      <i className="bi bi-file-earmark" />
+                      <i className={`bi ${fileIcon(f.rel_path)}`} />
                       {f.rel_path.slice(folder.length + 1)}
                     </span>
                     <span className="file-size">{fmtSize(f.size)}</span>

@@ -23,7 +23,9 @@ fn cep_extensions_dir() -> PathBuf {
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        dirs::home_dir().unwrap_or_default().join(".adobe/CEP/extensions")
+        dirs::home_dir()
+            .unwrap_or_default()
+            .join(".adobe/CEP/extensions")
     }
 }
 

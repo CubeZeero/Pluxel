@@ -11,6 +11,19 @@ use crate::models::{Manifest, Package, PackageFile, PackageKind};
 const BANNER_STEMS: [&str; 3] = ["banner", "preview", "thumbnail"];
 const IMAGE_EXTS: [&str; 4] = ["png", "jpg", "jpeg", "webp"];
 
+fn copy_file(src: &Path, dst: &Path) -> AppResult<()> {
+    fs::copy(src, dst)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            dst,
+            fs::Permissions::from_mode(fs::metadata(src)?.permissions().mode() & 0o777),
+        )?;
+    }
+    Ok(())
+}
+
 /// Recursively copy a file or directory `src` to `dst` (which is the full
 /// destination path, not a parent directory).
 pub fn copy_recursively(src: &Path, dst: &Path) -> AppResult<()> {
@@ -29,14 +42,14 @@ pub fn copy_recursively(src: &Path, dst: &Path) -> AppResult<()> {
                 if let Some(parent) = target.parent() {
                     fs::create_dir_all(parent)?;
                 }
-                fs::copy(entry.path(), &target)?;
+                copy_file(entry.path(), &target)?;
             }
         }
     } else {
         if let Some(parent) = dst.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::copy(src, dst)?;
+        copy_file(src, dst)?;
     }
     Ok(())
 }
@@ -63,7 +76,22 @@ fn classify_files(files: &[PackageFile]) -> PackageKind {
     };
     files
         .iter()
-        .map(|f| f.kind)
+        .flat_map(|f| {
+            // Leaf binaries often have no extension. Bundle ancestors still
+            // classify the package without changing the leaf file metadata.
+            std::iter::once(f.kind).chain(
+                Path::new(&f.rel_path)
+                    .ancestors()
+                    .skip(1)
+                    .filter(|p| {
+                        matches!(
+                            extension_of(p).to_ascii_lowercase().as_str(),
+                            "plugin" | "aex"
+                        )
+                    })
+                    .map(|_| PackageKind::Plugin),
+            )
+        })
         .max_by_key(|k| priority(*k))
         .unwrap_or(PackageKind::Unknown)
 }
@@ -80,7 +108,7 @@ fn classify_source(src: &Path, files: &[PackageFile]) -> PackageKind {
 }
 
 /// Enumerate the asset files under a package `files/` dir into [`PackageFile`]s.
-fn collect_files(files_dir: &Path) -> AppResult<Vec<PackageFile>> {
+pub(crate) fn collect_files(files_dir: &Path) -> AppResult<Vec<PackageFile>> {
     let mut out = Vec::new();
     for entry in WalkDir::new(files_dir).min_depth(1) {
         let entry = entry.map_err(|e| AppError::msg(e.to_string()))?;
@@ -164,7 +192,10 @@ fn adopt_banner(store: &LibraryStore, id: &str) -> AppResult<Option<String>> {
 /// Import a single source path (file or folder) into the library as one package.
 pub fn import_path(store: &LibraryStore, src: &Path) -> AppResult<Package> {
     if !src.exists() {
-        return Err(AppError::msg(format!("Path does not exist: {}", src.display())));
+        return Err(AppError::msg(format!(
+            "Path does not exist: {}",
+            src.display()
+        )));
     }
 
     let id = uuid::Uuid::new_v4().to_string();
@@ -227,7 +258,10 @@ pub fn import_path(store: &LibraryStore, src: &Path) -> AppResult<Package> {
 /// existing package's `files/` directory, preserving its structure.
 pub fn add_source(store: &LibraryStore, id: &str, src: &Path) -> AppResult<()> {
     if !src.exists() {
-        return Err(AppError::msg(format!("Path does not exist: {}", src.display())));
+        return Err(AppError::msg(format!(
+            "Path does not exist: {}",
+            src.display()
+        )));
     }
     let files_dir = store.files_dir(id);
     fs::create_dir_all(&files_dir)?;
@@ -301,10 +335,16 @@ pub fn import_distribution(store: &LibraryStore, dir: &Path) -> AppResult<Packag
             .iter()
             .find(|f| f.kind != PackageKind::Unknown)
             .or_else(|| files.first())
-            .and_then(|f| Path::new(&f.rel_path).file_stem().map(|s| s.to_string_lossy().to_string()))
+            .and_then(|f| {
+                Path::new(&f.rel_path)
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+            })
             .unwrap_or_else(|| "Imported Package".to_string());
     }
-    let kind = manifest.install_as.unwrap_or_else(|| classify_files(&files));
+    let kind = manifest
+        .install_as
+        .unwrap_or_else(|| classify_files(&files));
 
     // Reject zips that aren't a Pluxel package (e.g. a plain zip of images).
     if kind == PackageKind::Unknown {
@@ -332,7 +372,11 @@ pub fn import_distribution(store: &LibraryStore, dir: &Path) -> AppResult<Packag
 
 /// Replace all of a package's stored files with fresh sources (a version bump),
 /// preserving the package id, manifest and banner.
-pub fn replace_files(store: &LibraryStore, pkg: &mut Package, srcs: &[std::path::PathBuf]) -> AppResult<()> {
+pub fn replace_files(
+    store: &LibraryStore,
+    pkg: &mut Package,
+    srcs: &[std::path::PathBuf],
+) -> AppResult<()> {
     let files_dir = store.files_dir(&pkg.id);
     if files_dir.exists() {
         fs::remove_dir_all(&files_dir)?;
@@ -342,4 +386,36 @@ pub fn replace_files(store: &LibraryStore, pkg: &mut Package, srcs: &[std::path:
         add_source(store, &pkg.id, src)?;
     }
     rescan(store, pkg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plugin_rescan_after_companion_keeps_kind_and_manifest_override() {
+        let root = std::env::temp_dir().join(format!("importer-plugin-{}", uuid::Uuid::new_v4()));
+        let plugin = root.join("Foo.plugin");
+        fs::create_dir_all(plugin.join("Contents/MacOS")).unwrap();
+        fs::write(plugin.join("Contents/MacOS/Foo"), b"binary").unwrap();
+        let store = LibraryStore::new(root.join("library")).unwrap();
+        let mut pkg = import_path(&store, &plugin).unwrap();
+        assert_eq!(pkg.kind, PackageKind::Plugin);
+        assert!(pkg.manifest.install_as.is_none());
+        let companion = root.join("Preset.ffx");
+        fs::write(&companion, b"preset").unwrap();
+        add_source(&store, &pkg.id, &companion).unwrap();
+        rescan(&store, &mut pkg).unwrap();
+        assert_eq!(pkg.kind, PackageKind::Plugin);
+        assert!(pkg.files.iter().any(
+            |f| f.rel_path == "Foo.plugin/Contents/MacOS/Foo" && f.kind == PackageKind::Unknown
+        ));
+        fs::remove_file(store.files_dir(&pkg.id).join("Preset.ffx")).unwrap();
+        rescan(&store, &mut pkg).unwrap();
+        assert_eq!(pkg.kind, PackageKind::Plugin);
+        pkg.manifest.install_as = Some(PackageKind::ScriptUiPanel);
+        rescan(&store, &mut pkg).unwrap();
+        assert_eq!(pkg.kind, PackageKind::ScriptUiPanel);
+        fs::remove_dir_all(root).unwrap();
+    }
 }

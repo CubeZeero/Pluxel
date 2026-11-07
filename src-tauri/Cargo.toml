@@ -1,6 +1,6 @@
 [package]
 name = "pluxel"
-version = "1.1.0"
+version = "1.2.0"
 description = "Storage vault and installer for After Effects scripts and plugins"
 authors = ["cubezeero"]
 license = "GPL-3.0-or-later"
@@ -25,17 +25,20 @@ tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 walkdir = "2"
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 dirs = "6"
 base64 = "0.22"
+arboard = "3"
+png = "0.17"
+sha2 = "0.10"
 
 # For the CLI (`pluxel package`) to print to the parent console on Windows,
 # where the release build is a GUI-subsystem app.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.60", features = ["Win32_System_Console"] }
+windows-sys = { version = "0.60", features = ["Win32_System_Console", "Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [profile.release]
 panic = "abort"

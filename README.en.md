@@ -19,6 +19,7 @@ Pluxel is a desktop app that **keeps all your After Effects scripts, effect plug
 - **Companion files included** — Bundle `.ffx` presets and panel image folders that ship alongside a `.jsx`, and install them together
 - **Update / uninstall** — Records where each item was installed, so you can reinstall (update) or remove it later
 - **Batch install** — Install multiple selected items in a single action (with just one admin-privilege prompt)
+- **Touch ID on macOS** — Set up the helper to authenticate once per launch; further administrator operations require no additional authentication until quit or manual lock
 - **Clear overview** — Organize items aescripts-style with banner images, author, version, and tags
 - **Backup** — Export your entire library to a single package file (`.ppf`) and restore it anywhere
 

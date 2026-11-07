@@ -5,7 +5,7 @@ import { ASSET_FILTER, IMAGE_FILTER, PPF_EXT, PPF_FILTER, PPF_IMPORT_FILTER } fr
 import { sanitizeFilename } from "./text";
 import { useT } from "./i18n";
 import { effectsSubdir } from "./theme";
-import type { AeInstallation, Bundle, Manifest, Package } from "../types";
+import type { AeInstallation, Bundle, Manifest, Package, PreparedImport, InstallConflict, IntegrityEntry, ActivityEvent, Revision } from "../types";
 import type { ToastMsg } from "../components/Toast";
 
 export interface ConfirmOptions {
@@ -35,12 +35,44 @@ export function useLibrary() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedBundleId, setSelectedBundleId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
   const [toast, setToast] = useState<ToastMsg | null>(null);
   const [confirmState, setConfirmState] = useState<ConfirmOptions | null>(null);
   const confirmResolver = useRef<((ok: boolean) => void) | null>(null);
   const [adminModal, setAdminModal] = useState(false);
   const adminResolver = useRef<((ok: boolean) => void) | null>(null);
   const t = useT();
+  const [importPreview, setImportPreview] = useState<PreparedImport | null>(null);
+  const previewResolver = useRef<((ok: boolean) => void) | null>(null);
+  const [installConflicts, setInstallConflicts] = useState<InstallConflict[] | null>(null);
+  const conflictResolver = useRef<((ok: boolean) => void) | null>(null);
+  const [integrity, setIntegrity] = useState<IntegrityEntry[] | null>(null);
+  const [history, setHistory] = useState<ActivityEvent[] | null>(null);
+  const [revisionView, setRevisionView] = useState<{pkg: Package; revisions: Revision[]} | null>(null);
+
+  const resolvePreview = useCallback((ok: boolean) => {
+    setImportPreview(null);
+    previewResolver.current?.(ok);
+    previewResolver.current = null;
+  }, []);
+  const resolveConflicts = useCallback((ok: boolean) => {
+    setInstallConflicts(null);
+    conflictResolver.current?.(ok);
+    conflictResolver.current = null;
+  }, []);
+
+  const withConflicts = useCallback(async <T,>(run: (allow: boolean) => Promise<T>): Promise<T | null> => {
+    try { return await run(false); }
+    catch (e) {
+      const raw = String(e);
+      if (!raw.startsWith("PLUXEL_CONFLICT:")) throw e;
+      const conflicts = JSON.parse(raw.slice("PLUXEL_CONFLICT:".length)) as InstallConflict[];
+      setInstallConflicts(conflicts);
+      const allow = await new Promise<boolean>((resolve) => { conflictResolver.current = resolve; });
+      if (!allow) return null;
+      return run(true);
+    }
+  }, []);
 
   const notify = useCallback((message: string, kind: ToastMsg["kind"] = "info") => {
     setToast({ message, kind, id: Math.random() });
@@ -92,6 +124,13 @@ export function useLibrary() {
    * confirm on Windows (its UAC prompt follows on the elevated call). */
   const ensureAdminUnlock = useCallback(
     async (opts: { message: string; okLabel: string }): Promise<boolean> => {
+      // The backend authenticates once per elevated transaction in helper mode.
+      const helper = await api.helperStatus().catch(() => null);
+      if (helper?.enabled) return true;
+      if (helper?.available && helper.status !== "notRegistered") {
+        notify(t("settings.helperApproval"), "info");
+        return false;
+      }
       const status = await api.adminStatus();
       if (status.unlocked) return true;
       if (!status.supported) {
@@ -104,7 +143,7 @@ export function useLibrary() {
       }
       return promptAdminUnlock();
     },
-    [confirm, promptAdminUnlock, t],
+    [confirm, promptAdminUnlock, notify, t],
   );
 
   const refresh = useCallback(async () => {
@@ -124,17 +163,27 @@ export function useLibrary() {
 
   /** Run an async action with the busy flag set and errors surfaced as toasts. */
   const withBusy = useCallback(
-    async (fn: () => Promise<void>) => {
+    async (fn: () => Promise<void | boolean>) => {
+      if (busyRef.current) return false;
+      busyRef.current = true;
       setBusy(true);
       try {
-        await fn();
+        const result = await fn();
+        return result !== false;
       } catch (e) {
+        await refresh();
         notify(String(e), "error");
+        return false;
       } finally {
+        try {
+          const warnings = await api.takeOperationWarnings();
+          if (warnings.length) notify(warnings.map((key) => t(key)).join("\n"), "info");
+        } catch { /* Keep the result of the operation if diagnostics are unavailable. */ }
+        busyRef.current = false;
         setBusy(false);
       }
     },
-    [notify],
+    [notify, refresh, t],
   );
 
   /**
@@ -186,6 +235,7 @@ export function useLibrary() {
             p.manifest.name.trim().toLowerCase() === nw.manifest.name.trim().toLowerCase(),
         );
         if (!dup) {
+          existing.push(nw);
           selectId = nw.id;
           done++;
           continue;
@@ -201,7 +251,7 @@ export function useLibrary() {
           selectId = dup.id;
           done++;
         } else {
-          await api.removePackage(nw.id);
+          await api.discardImport(nw.id, dup.id);
         }
       }
       return { selectId, done };
@@ -223,40 +273,41 @@ export function useLibrary() {
     [reconcile, refresh, notify, t],
   );
 
-  const importPaths = useCallback(
-    (paths: string[]) =>
-      withBusy(async () => {
-        const added = await api.importPaths(paths);
-        await finishImport(added, "toast.added");
-      }),
-    [withBusy, finishImport],
-  );
+  const previewImport = useCallback(async (paths: string[]) => {
+    const prepared = await api.prepareImport(paths);
+    let committed = false;
+    try {
+      setImportPreview(prepared);
+      const accepted = await new Promise<boolean>((resolve) => { previewResolver.current = resolve; });
+      if (!accepted) return;
+      const added = await api.commitImport(prepared.token);
+      committed = true;
+      await finishImport(added, "toast.added");
+    } finally {
+      setImportPreview(null);
+      if (!committed) {
+        try { await api.cancelImport(prepared.token); }
+        catch { notify(t("maintenance.warningCleanup"), "info"); }
+      }
+    }
+  }, [finishImport, notify, t]);
 
   const importFiles = useCallback(
     () =>
       withBusy(async () => {
         const paths = await pickPaths({ multiple: true, directory: false, filters: [ASSET_FILTER] });
-        if (paths.length) await importPaths(paths);
+        if (paths.length) await previewImport(paths);
       }),
-    [withBusy, importPaths],
+    [withBusy, previewImport],
   );
 
   /** Handle dropped paths: `.ppf`/`.zip` → archive import, everything else → assets. */
   const importDropped = useCallback(
     (paths: string[]) =>
       withBusy(async () => {
-        const isArchive = (p: string) => {
-          const s = p.toLowerCase();
-          return s.endsWith(".ppf") || s.endsWith(".zip");
-        };
-        const archives = paths.filter(isArchive);
-        const assets = paths.filter((p) => !isArchive(p));
-        const added: Package[] = [];
-        for (const arc of archives) added.push(...(await api.importArchive(arc)));
-        if (assets.length) added.push(...(await api.importPaths(assets)));
-        await finishImport(added, "toast.added");
+        if (paths.length) await previewImport(paths);
       }),
-    [withBusy, finishImport],
+    [withBusy, previewImport],
   );
 
   const importPackageZip = useCallback(
@@ -268,10 +319,9 @@ export function useLibrary() {
           filters: [PPF_IMPORT_FILTER],
         });
         if (!arc) return;
-        const added = await api.importArchive(arc);
-        await finishImport(added, "toast.importedZip");
+        await previewImport([arc]);
       }),
-    [withBusy, finishImport],
+    [withBusy, previewImport],
   );
 
   const exportLibraryZip = useCallback(
@@ -316,35 +366,63 @@ export function useLibrary() {
     [withBusy, notify, t],
   );
 
+  const checkIntegrity = useCallback((id?: string) => withBusy(async () => {
+    setIntegrity(await api.checkIntegrity(id));
+  }), [withBusy]);
+  const showHistory = useCallback(() => withBusy(async () => {
+    setHistory(await api.getHistory());
+  }), [withBusy]);
+  const showRevisions = useCallback((pkg: Package) => withBusy(async () => {
+    setRevisionView({pkg, revisions: await api.getRevisions(pkg.id)});
+  }), [withBusy]);
+
+  const restoreRevision = useCallback((revisionId: string, reinstall: boolean) => withBusy(async () => {
+    if (!revisionView) return;
+    const pkg = revisionView.pkg;
+    await api.restoreRevision(pkg.id, revisionId);
+    setRevisionView(null);
+    await refresh();
+    if (reinstall) {
+      try {
+        const result = await withConflicts((allow_overwrite) => withElevation(
+          (elevated) => api.reinstallPackage(pkg.id, {elevated, allow_overwrite, effect_subdir: effectsSubdir()}),
+          {message: t("elevate.msg"), okLabel: t("elevate.ok")},
+        ));
+        await refresh();
+        notify(t(result ? "maintenance.restoredInstalled" : "maintenance.restoredVault"), result ? "success" : "info");
+      } catch(e) { throw new Error(t("maintenance.reinstallFailed", {error: String(e)})); }
+    } else notify(t("maintenance.restoredVault"), "success");
+  }), [revisionView, withBusy, refresh, withConflicts, withElevation, notify, t]);
+
   const install = useCallback(
     (pkg: Package, params: InstallParams) =>
       withBusy(async () => {
-        const updated = (await withElevation(
+        const updated = (await withConflicts((allow_overwrite) => withElevation(
           (elevated) =>
-            api.installPackage(pkg.id, { ...params, elevated, effect_subdir: effectsSubdir() }),
+            api.installPackage(pkg.id, { ...params, elevated, allow_overwrite, effect_subdir: effectsSubdir() }),
           { message: t("elevate.msg"), okLabel: t("elevate.ok") },
-        )) as Package | null;
-        if (!updated) return;
+        ))) as Package | null;
+        if (!updated) return false;
         await refresh();
         const rec = updated.installs[updated.installs.length - 1];
         notify(t("toast.installed", { name: pkg.manifest.name, label: rec?.label ?? "" }), "success");
       }),
-    [withBusy, withElevation, refresh, notify, t],
+    [withBusy, withConflicts, withElevation, refresh, notify, t],
   );
 
   /** Install one package into every detected AE version at once (one elevation). */
   const installAll = useCallback(
     (pkg: Package) =>
       withBusy(async () => {
-        const updated = (await withElevation(
-          (elevated) => api.installAllAe(pkg.id, { elevated, effect_subdir: effectsSubdir() }),
+        const updated = (await withConflicts((allow_overwrite) => withElevation(
+          (elevated) => api.installAllAe(pkg.id, { elevated, allow_overwrite, effect_subdir: effectsSubdir() }),
           { message: t("elevate.msg"), okLabel: t("elevate.ok") },
-        )) as Package | null;
-        if (!updated) return;
+        ))) as Package | null;
+        if (!updated) return false;
         await refresh();
         notify(t("toast.installedAllAe", { name: pkg.manifest.name, count: aeInstalls.length }), "success");
       }),
-    [withBusy, withElevation, refresh, notify, t, aeInstalls.length],
+    [withBusy, withConflicts, withElevation, refresh, notify, t, aeInstalls.length],
   );
 
   /** Install several selected packages to one AE target in a single batch (one
@@ -352,19 +430,19 @@ export function useLibrary() {
   const installSelected = useCallback(
     (ids: string[], installation: AeInstallation) =>
       withBusy(async () => {
-        if (!ids.length) return;
+        if (!ids.length) return false;
         // Count how many are already installed at this target (→ "updated").
         const updated = ids.filter((id) =>
           packages
             .find((p) => p.id === id)
             ?.installs.some((r) => r.ae?.root === installation.root),
         ).length;
-        const res = (await withElevation(
+        const res = (await withConflicts((allow_overwrite) => withElevation(
           (elevated) =>
-            api.installPackages(ids, { installation, elevated, effect_subdir: effectsSubdir() }),
+            api.installPackages(ids, { installation, elevated, allow_overwrite, effect_subdir: effectsSubdir() }),
           { message: t("elevate.msg"), okLabel: t("elevate.ok") },
-        )) as Package[] | null;
-        if (!res) return;
+        ))) as Package[] | null;
+        if (!res) return false;
         await refresh();
         notify(
           updated > 0
@@ -373,7 +451,7 @@ export function useLibrary() {
           "success",
         );
       }),
-    [withBusy, withElevation, packages, refresh, notify, t],
+    [withBusy, withConflicts, withElevation, packages, refresh, notify, t],
   );
 
   const runInstaller = useCallback(
@@ -422,6 +500,16 @@ export function useLibrary() {
         const [img] = await pickPaths({ multiple: false, directory: false, filters: [IMAGE_FILTER] });
         if (!img) return;
         await api.setBanner(id, img);
+        await refresh();
+        notify(t("toast.bannerSet"), "success");
+      }),
+    [withBusy, refresh, notify, t],
+  );
+
+  const setBannerFromClipboard = useCallback(
+    (id: string) =>
+      withBusy(async () => {
+        await api.setBannerClipboard(id);
         await refresh();
         notify(t("toast.bannerSet"), "success");
       }),
@@ -523,7 +611,7 @@ export function useLibrary() {
     (bundleId: string, packageIds: string[]) =>
       withBusy(async () => {
         const b = (await api.getLibrary()).bundles.find((x) => x.id === bundleId);
-        if (!b) return;
+        if (!b) return false;
         const merged = [...new Set([...b.package_ids, ...packageIds])];
         const added = merged.length - b.package_ids.length;
         await api.updateBundle({ ...b, package_ids: merged });
@@ -540,6 +628,16 @@ export function useLibrary() {
         const [img] = await pickPaths({ multiple: false, directory: false, filters: [IMAGE_FILTER] });
         if (!img) return;
         await api.setBundleBanner(id, img);
+        await refresh();
+        notify(t("toast.bannerSet"), "success");
+      }),
+    [withBusy, refresh, notify, t],
+  );
+
+  const setBundleBannerFromClipboard = useCallback(
+    (id: string) =>
+      withBusy(async () => {
+        await api.setBundleBannerClipboard(id);
         await refresh();
         notify(t("toast.bannerSet"), "success");
       }),
@@ -586,16 +684,16 @@ export function useLibrary() {
   const installBundle = useCallback(
     (bundle: Bundle, params: InstallParams) =>
       withBusy(async () => {
-        const done = await withElevation(
+        const done = await withConflicts((allow_overwrite) => withElevation(
           (elevated) =>
-            api.installBundle(bundle.id, { ...params, elevated, effect_subdir: effectsSubdir() }),
+            api.installBundle(bundle.id, { ...params, elevated, allow_overwrite, effect_subdir: effectsSubdir() }),
           { message: t("elevate.msg"), okLabel: t("elevate.ok") },
-        );
-        if (!done) return;
+        ));
+        if (!done) return false;
         await refresh();
         notify(t("toast.bundleInstalled", { count: (done as Package[]).length }), "success");
       }),
-    [withBusy, withElevation, refresh, notify, t],
+    [withBusy, withConflicts, withElevation, refresh, notify, t],
   );
 
   const exportBundle = useCallback(
@@ -614,6 +712,10 @@ export function useLibrary() {
   const selectedBundle = bundles.find((b) => b.id === selectedBundleId) ?? null;
 
   return {
+    importPreview, resolvePreview, installConflicts, resolveConflicts,
+    integrity, closeIntegrity: () => setIntegrity(null), checkIntegrity,
+    history, closeHistory: () => setHistory(null), showHistory,
+    revisionView, closeRevisions: () => setRevisionView(null), showRevisions, restoreRevision,
     packages,
     bundles,
     aeInstalls,
@@ -630,6 +732,7 @@ export function useLibrary() {
     installBundle,
     exportBundle,
     setBundleBanner,
+    setBundleBannerFromClipboard,
     clearBundleBanner,
     busy,
     toast,
@@ -652,6 +755,7 @@ export function useLibrary() {
     uninstall,
     saveManifest,
     setBanner,
+    setBannerFromClipboard,
     clearBanner,
     addFiles,
     addFolder,

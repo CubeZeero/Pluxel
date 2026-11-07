@@ -1,12 +1,20 @@
+mod activity;
 mod ae;
 mod archive;
+mod assets;
 pub mod cli;
 mod commands;
+mod deployment;
 mod error;
+mod helper;
 mod importer;
 mod installer;
 mod library;
+mod maintenance;
 mod models;
+mod paths;
+mod preview;
+mod warnings;
 
 #[cfg(test)]
 mod tests;
@@ -30,8 +38,20 @@ fn build_menu(handle: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         "File",
         true,
         &[
-            &MenuItem::with_id(handle, "import_package", "パッケージを追加 (.ppf)", true, None::<&str>)?,
-            &MenuItem::with_id(handle, "import_assets", "スクリプト・プラグインを追加", true, None::<&str>)?,
+            &MenuItem::with_id(
+                handle,
+                "import_package",
+                "パッケージを追加 (.ppf)",
+                true,
+                None::<&str>,
+            )?,
+            &MenuItem::with_id(
+                handle,
+                "import_assets",
+                "スクリプト・プラグインを追加",
+                true,
+                None::<&str>,
+            )?,
             &PredefinedMenuItem::separator(handle)?,
             &PredefinedMenuItem::close_window(handle, None)?,
         ],
@@ -41,7 +61,13 @@ fn build_menu(handle: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         "Edit",
         true,
         &[
-            &MenuItem::with_id(handle, "toggle_select", "複数選択モード", true, None::<&str>)?,
+            &MenuItem::with_id(
+                handle,
+                "toggle_select",
+                "複数選択モード",
+                true,
+                None::<&str>,
+            )?,
             &PredefinedMenuItem::separator(handle)?,
             &PredefinedMenuItem::undo(handle, None)?,
             &PredefinedMenuItem::redo(handle, None)?,
@@ -115,6 +141,20 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
+            commands::prepare_import,
+            commands::helper_status,
+            commands::helper_register,
+            commands::helper_unregister,
+            commands::helper_authenticate,
+            commands::take_operation_warnings,
+            commands::commit_import,
+            commands::discard_import,
+            commands::cancel_import,
+            commands::check_integrity,
+            commands::get_history,
+            commands::get_revisions,
+            commands::restore_revision,
+            commands::reinstall_package,
             commands::admin_status,
             commands::admin_unlock,
             commands::admin_lock,
@@ -128,6 +168,7 @@ pub fn run() {
             commands::replace_package,
             commands::update_manifest,
             commands::set_banner,
+            commands::set_banner_clipboard,
             commands::clear_banner,
             commands::read_banner,
             commands::detect_ae,
@@ -146,6 +187,7 @@ pub fn run() {
             commands::install_bundle,
             commands::export_bundle,
             commands::set_bundle_banner,
+            commands::set_bundle_banner_clipboard,
             commands::clear_bundle_banner,
             commands::read_bundle_banner,
         ])
