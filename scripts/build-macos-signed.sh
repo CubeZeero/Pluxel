@@ -101,7 +101,20 @@ codesign --verify --deep --strict --verbose=2 "$APP"
 spctl --assess --type execute --verbose=2 "$APP"
 
 echo '▶ Creating updater archive from stapled app'
-tar -czf "$WORK/Pluxel.app.tar.gz" -C "$(dirname "$APP")" "$(basename "$APP")"
+COPYFILE_DISABLE=1 tar --no-xattrs -czf "$WORK/Pluxel.app.tar.gz" -C "$(dirname "$APP")" "$(basename "$APP")"
+# The updater strips the first path component from every entry. AppleDouble
+# siblings such as ._Pluxel.app would therefore overwrite its extraction root.
+python3 - "$WORK/Pluxel.app.tar.gz" <<'PY'
+import sys, tarfile
+with tarfile.open(sys.argv[1]) as archive:
+    members = archive.getmembers()
+    if not members or not members[0].isdir() or members[0].name.rstrip('/') != 'Pluxel.app':
+        raise SystemExit('Invalid updater archive root')
+    for member in members:
+        parts = member.name.split('/')
+        if parts[0] != 'Pluxel.app' or any(p.startswith('._') or p == '..' for p in parts):
+            raise SystemExit('Unexpected updater archive entry')
+PY
 # Signer stdout includes signature text; keep it private and report only file paths.
 npm run tauri -- signer sign "$WORK/Pluxel.app.tar.gz" > "$WORK/signer.log" 2>&1
 [[ -s "$WORK/Pluxel.app.tar.gz.sig" ]] || { echo 'Updater signature missing' >&2; exit 1; }
