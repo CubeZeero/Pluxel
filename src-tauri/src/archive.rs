@@ -299,7 +299,73 @@ pub fn write_ppf_from_paths(
     manifest: &crate::models::Manifest,
     inputs: &[std::path::PathBuf],
 ) -> AppResult<()> {
+    write_ppf_inputs(dest, manifest, inputs, None)
+}
+
+/// An explicitly selected banner is stored at the distribution root regardless
+/// of its source name. Reject ambiguous root banners rather than relying on
+/// filesystem enumeration order during import.
+pub fn write_ppf_with_banner(
+    dest: &Path,
+    manifest: &crate::models::Manifest,
+    inputs: &[PathBuf],
+    banner: &Path,
+) -> AppResult<()> {
+    write_ppf_inputs(dest, manifest, inputs, Some(banner))
+}
+
+fn write_ppf_inputs(
+    dest: &Path,
+    manifest: &crate::models::Manifest,
+    inputs: &[PathBuf],
+    banner: Option<&Path>,
+) -> AppResult<()> {
     reject_input_overlap(dest, inputs)?;
+    let selected_banner = match banner {
+        Some(path) => {
+            let ext = path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if !path.is_file() || !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp") {
+                return Err(AppError::msg(
+                    "--banner requires an existing PNG, JPG, JPEG or WebP file",
+                ));
+            }
+            reject_input_overlap(dest, &[path.to_path_buf()])?;
+            let canonical = path.canonicalize()?;
+            for input in inputs.iter().filter(|p| p.is_file()) {
+                let stem = input
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                let extension = input
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if ["banner", "preview", "thumbnail"].contains(&stem.as_str())
+                    && ["png", "jpg", "jpeg", "webp"].contains(&extension.as_str())
+                    && input.canonicalize()? != canonical
+                {
+                    return Err(AppError::msg("Conflicting banner input: remove banner/preview/thumbnail images from positional inputs when using --banner"));
+                }
+            }
+            let mut bytes = Vec::new();
+            fs::File::open(path)?
+                .take(32 * 1024 * 1024 + 1)
+                .read_to_end(&mut bytes)?;
+            if bytes.is_empty() || bytes.len() > 32 * 1024 * 1024 {
+                return Err(AppError::msg(
+                    "--banner image must be non-empty and at most 32 MiB",
+                ));
+            }
+            Some((canonical, format!("banner.{ext}"), bytes))
+        }
+        None => None,
+    };
     atomic_zip(dest, |zip| {
         let opts =
             SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
@@ -312,7 +378,17 @@ pub fn write_ppf_from_paths(
         zip.start_file("manifest.json", opts)?;
         zip.write_all(serde_json::to_string_pretty(&manifest_json)?.as_bytes())?;
 
+        if let Some((_, name, bytes)) = &selected_banner {
+            zip.start_file(name, opts)?;
+            zip.write_all(bytes)?;
+        }
+
         for input in inputs {
+            if let Some((banner_path, _, _)) = &selected_banner {
+                if input.is_file() && input.canonicalize()? == *banner_path {
+                    continue;
+                }
+            }
             if !input.exists() {
                 return Err(AppError::msg(format!(
                     "no such file or folder: {}",
