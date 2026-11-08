@@ -39,6 +39,21 @@ pluxel package --name Wiggle --out Wiggle.ppf  ./WiggleFiles/
 - パスに**スペースが含まれる**場合は引用符で囲みます: `"My Script.jsx"`。
 - 指定した中に対応形式(`.jsx` など)が 1 つも無いとエラーになります(下記参照)。
 
+## バナー画像を含める
+
+### `--banner` で指定する
+
+`--banner <画像パス>` を使うと、画像のファイル名や保存場所に関係なくバナーとして指定できます。
+PNG / JPG / JPEG / WebPに対応し、空でない32 MiB以下のファイルを指定してください。
+
+```sh
+pluxel package --name "MyEffect" --version 1.0.0 --banner "./images/My artwork.png" --out ./MyEffect.ppf MyEffect.jsx
+```
+
+画像はPPFの直下に `banner.<拡張子>` として保存され、読み込み時にバナーとして認識されます。
+`--banner` は1回だけ指定してください。別の `banner` / `preview` / `thumbnail` 画像を
+直下の入力ファイルとして併用すると、競合エラーになります。
+
 ## 実行ファイルの場所
 
 === "macOS"
@@ -64,6 +79,7 @@ pluxel package --name Wiggle --out Wiggle.ppf  ./WiggleFiles/
 | `--author <作者>` | 作者 |
 | `--description <説明>` | 説明 |
 | `--homepage <URL>` | ホームページ |
+| `--banner <画像パス>` | バナー画像（PNG / JPG / JPEG / WebP、最大32 MiB） |
 | `--kind <種類>` | `script` / `script-ui-panel` / `plugin` / `zxp` / `installer`(省略時は**自動判別**) |
 | `--out <パス>` | 出力先(省略時は `./<name>.ppf`) |
 | `-h`, `--help` | ヘルプを表示 |
@@ -87,5 +103,5 @@ pluxel package --name Wiggle --out Wiggle.ppf  ./WiggleFiles/
 ```
 # スクリプト + 付随ファイルをまとめて 1 つのパッケージに
 pluxel package --name "Wiggle Pro" --version 2.1.0 --author cubezeero \
-  --out ./WigglePro.ppf wiggle.jsx presets/ icon.png
+  --banner ./banner.png --out ./WigglePro.ppf wiggle.jsx presets/ icon.png
 ```

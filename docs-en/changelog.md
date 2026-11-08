@@ -6,6 +6,10 @@ icon: material/history
 
 Changes for each Pluxel release.
 
+## 1.2.1
+
+- Added `--banner <PATH>` when creating PPF packages from the command line
+
 ## 1.2.0
 
 ### Added

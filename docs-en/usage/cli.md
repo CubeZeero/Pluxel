@@ -39,6 +39,21 @@ pluxel package --name Wiggle --out Wiggle.ppf  ./WiggleFiles/
 - Quote paths that contain **spaces**: `"My Script.jsx"`.
 - If none of the entries is a supported type (`.jsx`, etc.), it errors (see below).
 
+## Including a banner image
+
+### Use `--banner`
+
+Use `--banner <PATH>` to select a banner regardless of the image's filename or location.
+Supported formats are PNG / JPG / JPEG / WebP. The file must be non-empty and at most 32 MiB.
+
+```sh
+pluxel package --name "MyEffect" --version 1.0.0 --banner "./images/My artwork.png" --out ./MyEffect.ppf MyEffect.jsx
+```
+
+The image is stored at the PPF root as `banner.<extension>` and recognized as a banner on import.
+Specify `--banner` only once. Including another root-level `banner` / `preview` / `thumbnail`
+image as a positional input produces a conflict error.
+
 ## Where the executable is
 
 === "macOS"
@@ -64,6 +79,7 @@ pluxel package --name Wiggle --out Wiggle.ppf  ./WiggleFiles/
 | `--author <AUTHOR>` | Author |
 | `--description <TEXT>` | Description |
 | `--homepage <URL>` | Homepage URL |
+| `--banner <PATH>` | Banner image (PNG / JPG / JPEG / WebP, up to 32 MiB) |
 | `--kind <KIND>` | `script` / `script-ui-panel` / `plugin` / `zxp` / `installer` (**auto-detected** when omitted) |
 | `--out <PATH>` | Output path (defaults to `./<name>.ppf`) |
 | `-h`, `--help` | Show help |
@@ -87,5 +103,5 @@ When `--kind` is omitted, the kind is auto-detected from the input file extensio
 ```
 # Bundle a script with its companion files into one package
 pluxel package --name "Wiggle Pro" --version 2.1.0 --author cubezeero \
-  --out ./WigglePro.ppf wiggle.jsx presets/ icon.png
+  --banner ./banner.png --out ./WigglePro.ppf wiggle.jsx presets/ icon.png
 ```
